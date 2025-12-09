@@ -260,50 +260,73 @@ nav a:hover {
 
 .carousel-card {
     position: absolute;
-    width: 360px;
-    height: 216px;
-    /* Landscape for video feel */
-    left: -180px;
-    top: -108px;
-    background: var(--glass-bg);
-    border: 1px solid var(--glass-border);
-    border-radius: 12px;
-    backdrop-filter: blur(12px);
-    -webkit-backdrop-filter: blur(12px);
-    overflow: hidden;
-    backface-visibility: hidden;
-    /* Hide back for performance */
+    width: 800px;
+    height: 500px;
+    left: -400px;
+    top: -250px;
 
-    /* Entrance State */
-    opacity: 0;
-    transform: scale(0) translateZ(-1000px);
-    /* Start far away */
-    transition: transform 1.5s cubic-bezier(0.16, 1, 0.3, 1), opacity 1.5s ease;
-    box-shadow: 0 4px 30px rgba(0, 0, 0, 0.1);
+    /* Frosted glass effect */
+    background: rgba(255, 255, 255, 0.08);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 16px;
+
+    /* Glass shine and depth */
+    box-shadow:
+        0 8px 32px rgba(0, 0, 0, 0.4),
+        0 0 0 1px rgba(255, 255, 255, 0.05) inset,
+        0 1px 0 rgba(255, 255, 255, 0.1) inset;
+
+    overflow: hidden;
+    backface-visibility: visible; /* Show back of card */
+    transform-style: preserve-3d;
+
+    /* No transform transition - JS handles smooth animation */
+    transition: opacity 0.3s ease-out,
+                box-shadow 0.5s ease,
+                border-color 0.5s ease;
+}
+
+/* Card back face - visible when card is rotated */
+.carousel-card::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: linear-gradient(135deg, rgba(30, 30, 35, 0.95) 0%, rgba(15, 15, 20, 0.98) 100%);
+    border-radius: 16px;
+    backface-visibility: hidden;
+    transform: rotateY(180deg);
+    z-index: -1;
 }
 
 .carousel-card.visible {
     opacity: 1;
-    /* Transform will be set by JS, but we need to ensure the transition works */
 }
 
 .carousel-card:hover {
-    box-shadow: 0 0 30px rgba(0, 229, 255, 0.4);
-    border-color: rgba(255, 255, 255, 0.5);
-    z-index: 10;
-    /* Bring to front on hover */
+    box-shadow:
+        0 16px 48px rgba(0, 0, 0, 0.5),
+        0 0 0 1px rgba(255, 255, 255, 0.1) inset,
+        0 1px 0 rgba(255, 255, 255, 0.2) inset,
+        0 0 40px rgba(255, 255, 255, 0.1);
+    border-color: rgba(255, 255, 255, 0.3);
+    z-index: 100;
 }
 
 .card-image-placeholder {
     width: 100%;
-    height: 100%;
-    background: #000;
-    opacity: 0.6;
+    height: 65%;
+    background: linear-gradient(135deg, rgba(0,0,0,0.3) 0%, rgba(0,0,0,0.1) 100%);
+    opacity: 0.8;
     transition: opacity 0.3s ease;
 }
 
 .carousel-card:hover .card-image-placeholder {
-    opacity: 0.8;
+    opacity: 1;
 }
 
 .card-content {
@@ -311,25 +334,25 @@ nav a:hover {
     bottom: 0;
     left: 0;
     width: 100%;
-    padding: 1.5rem;
-    background: linear-gradient(to top, rgba(0, 0, 0, 0.9), transparent);
-    transform: translateY(0);
-    /* Always visible */
-    opacity: 1;
+    padding: 1.25rem 1.5rem;
+    background: linear-gradient(to top, rgba(0, 0, 0, 0.6), transparent);
 }
 
 .genre-tag {
-    font-size: 0.6rem;
-    color: var(--accent-color);
-    margin-bottom: 0.2rem;
+    font-size: 0.65rem;
+    color: rgba(255, 255, 255, 0.6);
+    margin-bottom: 0.3rem;
     text-transform: uppercase;
-    letter-spacing: 0.1em;
+    letter-spacing: 0.15em;
+    font-weight: 500;
 }
 
 .carousel-card h3 {
-    font-size: 1.2rem;
+    font-size: 1.4rem;
     margin: 0;
     color: #fff;
+    font-weight: 700;
+    text-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
 }
 
 .carousel-hint {

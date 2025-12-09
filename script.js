@@ -22,6 +22,11 @@ let inIntro = true;
 let transitioning = false;   // For black frame beat
 let transitionScrollZ = 0;   // Store exact scrollZ at transition for symmetrical reverse
 
+// Spiral focus tracking for zero-gravity carousel
+let focusProgress = 0;        // Current interpolated focus position
+let targetFocusProgress = 0;  // Target focus position from scroll
+let carouselAnimating = false;
+
 // Static Shader Uniforms
 const staticUniforms = {
     time: { value: 0 },
@@ -552,14 +557,13 @@ function triggerBlackFrameTransition() {
     }, 80); // Brief black frame
 }
 
-// Initialize spiral at starting position - far below screen
-// User must scroll to bring it up
+// Initialize spiral at starting position - cards below screen, ready to emerge
 function initSpiralStartPosition() {
-    const helixRadius = 600;
-    carouselTrack.dataset.scrollY = -600; // Start way below
-    rotation = 0;
-    // Position helix far below so cards scroll in from bottom
-    carouselTrack.style.transform = `translateZ(-${helixRadius}px) translateY(600px) rotateY(0deg)`;
+    // Start with negative progress so first card is WELL below screen edge
+    // Need enough offset to push cards past bottom of viewport
+    focusProgress = -4;
+    targetFocusProgress = -4;
+    updateCardPositions(focusProgress);
 }
 
 function completeIntro() {
@@ -569,7 +573,7 @@ function completeIntro() {
     document.querySelector('.spiral-view').classList.add('active');
 }
 
-// --- Spiral Logic (Single-Strand DNA Helix) ---
+// --- Spiral Logic (Zero-Gravity Diagonal Showcase) ---
 
 function initSpiral() {
     let spiralView = document.querySelector('.spiral-view');
@@ -587,57 +591,124 @@ function initSpiral() {
     carouselTrack.className = 'carousel-track';
     carouselContainer.appendChild(carouselTrack);
 
-    // DNA Helix parameters
-    const helixRadius = 600;        // Tighter than before for drill feel
-    const verticalPitch = 350;      // Vertical distance per card
-    const totalCards = carouselData.length;
-
+    // Create all cards
     carouselData.forEach((item, index) => {
         const card = document.createElement('div');
         card.className = 'carousel-card visible';
-        card.innerHTML = `
-            <div class="card-image-placeholder" style="background: ${item.color}"></div>
-            <div class="card-content">
-                <div class="genre-tag">GENRE</div>
-                <h3>${item.title}</h3>
-            </div>
-        `;
+        card.dataset.index = index;
 
-        // Single helix: each card spirals upward
-        // Full rotation spread across cards for continuous spiral effect
-        const angle = (index / totalCards) * Math.PI * 2 * 2; // 2 full rotations total
-        const x = Math.sin(angle) * helixRadius;
-        const z = Math.cos(angle) * helixRadius - helixRadius; // Center behind viewer
-        const y = index * verticalPitch; // Spiral upward
+        // Create card content using DOM methods
+        const imagePlaceholder = document.createElement('div');
+        imagePlaceholder.className = 'card-image-placeholder';
+        imagePlaceholder.style.background = item.color;
 
-        // Face outward from helix center (perpendicular to radius)
-        const rotationY = (angle * 180 / Math.PI) + 90;
+        const content = document.createElement('div');
+        content.className = 'card-content';
 
-        card.style.transform = `translate3d(${x}px, ${y}px, ${z}px) rotateY(${rotationY}deg)`;
+        const genreTag = document.createElement('div');
+        genreTag.className = 'genre-tag';
+        genreTag.textContent = 'GENRE';
+
+        const title = document.createElement('h3');
+        title.textContent = item.title;
+
+        content.appendChild(genreTag);
+        content.appendChild(title);
+        card.appendChild(imagePlaceholder);
+        card.appendChild(content);
+
         carouselTrack.appendChild(card);
+    });
+
+    // Initial positioning - first card in spotlight
+    updateCardPositions(0);
+
+    // Start zero-gravity animation loop
+    if (!carouselAnimating) {
+        carouselAnimating = true;
+        animateCarousel();
+    }
+}
+
+// Update card positions based on current focus progress
+function updateCardPositions(progress) {
+    const cards = document.querySelectorAll('.carousel-card');
+    const totalCards = cards.length;
+
+    // Helical spiral around tower parameters (doubled for larger cards)
+    const towerRadius = 800;      // Distance from center pillar
+    const verticalSpacing = 900;  // Vertical distance between cards (doubled)
+    const anglePerCard = Math.PI / 2;  // 90 degrees per card - so 2 cards = 180° (back to front)
+
+    cards.forEach((card, index) => {
+        // Offset from current focus (can be fractional for smooth animation)
+        const offset = index - progress;
+
+        // HELICAL POSITION: Spiral around invisible tower
+        // offset +2 = 180° = back of card visible (entering from below/behind)
+        // offset +1 = 90° = side view
+        // offset 0 = 0° = front facing camera (spotlight)
+        // offset -1 = -90° = side view (exiting)
+        // offset -2 = -180° = back visible (exiting top)
+        const angle = offset * anglePerCard;
+
+        // Position on the helix - consistent spiral path
+        const x = Math.sin(angle) * towerRadius;
+        const z = Math.cos(angle) * towerRadius - towerRadius; // Shift so front card is at z=0
+        const y = offset * verticalSpacing; // Positive offset = below screen
+
+        // ROTATION: Face outward from tower (perpendicular to radius)
+        const rotY = angle * (180 / Math.PI);
+        // Subtle tilt following the spiral curve
+        const rotX = offset * -2;
+
+        // SCALE & OPACITY: Keep cards visible longer to see the back
+        const distanceFromCenter = Math.abs(offset);
+        const scale = Math.max(0.6, 1.0 - distanceFromCenter * 0.06);
+        // Cards stay more visible so we can see backs
+        const opacity = Math.max(0.3, 1 - distanceFromCenter * 0.15);
+
+        // Z-INDEX: Based on Z position (closer to camera = higher)
+        const zIndex = Math.floor(50 + z / 10);
+
+        card.style.transform = `
+            translate3d(${x}px, ${y}px, ${z}px)
+            rotateY(${rotY}deg)
+            rotateX(${rotX}deg)
+            scale(${scale})
+        `;
+        card.style.opacity = opacity;
+        card.style.zIndex = Math.max(1, zIndex);
     });
 }
 
+// Zero-gravity animation loop - smooth interpolation
+function animateCarousel() {
+    if (!carouselAnimating) return;
+
+    // Smooth interpolation (floaty feel, but responsive enough to see path)
+    const diff = targetFocusProgress - focusProgress;
+    focusProgress += diff * 0.04; // Slightly faster for better path visibility
+
+    updateCardPositions(focusProgress);
+    requestAnimationFrame(animateCarousel);
+}
+
 function handleSpiralScroll(delta) {
-    // Track spiral scroll position
-    if (!carouselTrack.dataset.scrollY) carouselTrack.dataset.scrollY = 0;
-    let currentY = parseFloat(carouselTrack.dataset.scrollY) + delta * 0.6;
+    // Slow scroll response (zero gravity feel)
+    targetFocusProgress += delta * 0.003;
 
-    // If scrolling back past the start, reverse to TV scene
-    if (currentY < -100 && delta < 0) {
+    // Clamp to valid range
+    const totalCards = carouselData.length;
+    const startProgress = -4; // Where cards start (well below screen)
+    const maxProgress = totalCards + 2;
+
+    targetFocusProgress = Math.max(startProgress, Math.min(targetFocusProgress, maxProgress));
+
+    // Reverse back to TV if scrolling back past start
+    if (targetFocusProgress <= startProgress + 0.1 && delta < 0) {
         triggerReverseTransition();
-        return;
     }
-
-    carouselTrack.dataset.scrollY = currentY;
-
-    // Rotate the helix (drilling motion)
-    rotation += delta * 0.002;
-
-    // Combined transform: translate (move through) + rotate (drill) = ascending helix
-    const helixRadius = 600;
-    carouselTrack.style.transform =
-        `translateZ(-${helixRadius}px) translateY(${-currentY}px) rotateY(${rotation}rad)`;
 }
 
 // Reverse transition back to TV scene - smooth pullback through screen
