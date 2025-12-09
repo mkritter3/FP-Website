@@ -6,6 +6,8 @@ let scene, camera, renderer, composer;
 let tvGroup, screenMesh, textMesh;
 let clock = new THREE.Clock();
 let mouseX = 0, mouseY = 0;
+const MAX_ANISOTROPY = 8;
+const ENABLE_SMOKE = false;
 
 // Spiral Variables
 let carouselContainer, carouselTrack;
@@ -53,19 +55,21 @@ function init() {
         // Scene
         scene = new THREE.Scene();
         scene.background = new THREE.Color(0x050505);
-        scene.fog = new THREE.FogExp2(0x050505, 0.0015); // Blend floor into background
+        scene.fog = new THREE.FogExp2(0x050505, 0.00045); // Light haze for depth, not blur
 
         // Camera
-        camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 3000);
-        camera.position.set(0, 20, 800); // Start far back, slightly elevated
+        camera = new THREE.PerspectiveCamera(48, window.innerWidth / window.innerHeight, 0.1, 4000);
+        camera.position.set(0, -40, 950); // Low, longer lens feel
         camera.lookAt(0, 0, 0);
 
         // Renderer
-        renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+        renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false, powerPreference: "high-performance" });
         renderer.setSize(window.innerWidth, window.innerHeight);
         renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-        renderer.shadowMap.enabled = true; // Enable shadows
+        renderer.shadowMap.enabled = true;
         renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        renderer.toneMapping = THREE.ACESFilmicToneMapping; // Cinematic tone mapping
+        renderer.toneMappingExposure = 0.9;
         container.appendChild(renderer.domElement);
 
         // Post-processing
@@ -80,8 +84,8 @@ function init() {
         // Create Procedural 3D TV
         createProceduralTV();
 
-        // Create Smoke Shader
-        createSmokeShader();
+        // Create Smoke Shader (disabled by default for a clean plate)
+        if (ENABLE_SMOKE) createSmokeShader();
 
         // Hide loader
         setTimeout(() => {
@@ -109,15 +113,25 @@ function init() {
 
 function setupPostProcessing() {
     try {
-        if (THREE.EffectComposer && THREE.RenderPass && THREE.UnrealBloomPass) {
+        if (THREE.EffectComposer && THREE.RenderPass && THREE.UnrealBloomPass && THREE.FilmPass) {
             composer = new THREE.EffectComposer(renderer);
             const renderPass = new THREE.RenderPass(scene, camera);
             composer.addPass(renderPass);
+
             const bloomPass = new THREE.UnrealBloomPass(
                 new THREE.Vector2(window.innerWidth, window.innerHeight),
-                0.8, 0.3, 0.85 // Strength, Radius, Threshold
+                0.25, 0.35, 0.88 // Strength, Radius, Threshold tuned for subtle screen glow
             );
             composer.addPass(bloomPass);
+
+            // Film Grain for "Gritty" look
+            const filmPass = new THREE.FilmPass(
+                0.08,   // noise intensity
+                0.015,  // scanline intensity
+                648,    // scanline count
+                false   // grayscale
+            );
+            composer.addPass(filmPass);
         } else {
             composer = null;
         }
@@ -128,74 +142,174 @@ function setupPostProcessing() {
 }
 
 function createLighting() {
-    // Ambient light
-    const ambient = new THREE.AmbientLight(0xffffff, 0.1);
+    // Minimal ambient to keep blacks rich
+    const ambient = new THREE.AmbientLight(0xffffff, 0.02);
     scene.add(ambient);
 
-    // Key Light (Spotlight)
-    const spotLight = new THREE.SpotLight(0xffffff, 1.5);
-    spotLight.position.set(100, 200, 200);
-    spotLight.angle = Math.PI / 6;
-    spotLight.penumbra = 0.5;
-    spotLight.castShadow = true;
-    spotLight.shadow.mapSize.width = 2048;
-    spotLight.shadow.mapSize.height = 2048;
-    scene.add(spotLight);
+    // Primary beam coming from the TV screen direction, casting long shadows
+    const beam = new THREE.SpotLight(0xffffff, 420, 2000, Math.PI / 10, 0.7, 2.0);
+    beam.position.set(0, -120, -560);
+    beam.castShadow = true;
+    beam.shadow.bias = -0.00008;
+    beam.shadow.mapSize.width = 4096;
+    beam.shadow.mapSize.height = 4096;
+    beam.target.position.set(0, -200, 150); // Aim toward mid-ground, not the camera
+    scene.add(beam);
+    scene.add(beam.target);
 
-    // Rim Light (Blue-ish)
-    const rimLight = new THREE.SpotLight(0x4444ff, 2);
-    rimLight.position.set(-200, 100, -100);
-    rimLight.lookAt(0, 0, 0);
-    scene.add(rimLight);
-
-    // Screen Glow Light (from the TV itself)
-    const screenLight = new THREE.PointLight(0xffffff, 0.5, 200);
-    screenLight.position.set(0, 0, 20);
-    scene.add(screenLight);
+    // Subtle bounce to lift deep blacks just a hair
+    const bounce = new THREE.HemisphereLight(0x0d0f12, 0x050505, 0.05);
+    scene.add(bounce);
 }
 
 function createEnvironment() {
-    // Reflective Floor
-    const floorGeometry = new THREE.PlaneGeometry(2000, 2000);
+    const textureLoader = new THREE.TextureLoader();
+
+    // Load and prep floor texture
+    const floorTexture = textureLoader.load('assets/floor-texture-map-no-light.png');
+    floorTexture.wrapS = THREE.RepeatWrapping;
+    floorTexture.wrapT = THREE.RepeatWrapping;
+    floorTexture.repeat.set(6, 6);
+    floorTexture.anisotropy = Math.min(renderer.capabilities.getMaxAnisotropy(), MAX_ANISOTROPY);
+    floorTexture.encoding = THREE.sRGBEncoding;
+
+    const floorBump = floorTexture.clone();
+    floorBump.encoding = THREE.LinearEncoding;
+    floorBump.wrapS = THREE.RepeatWrapping;
+    floorBump.wrapT = THREE.RepeatWrapping;
+    floorBump.repeat.copy(floorTexture.repeat);
+
+    // Floor plane
+    const floorGeometry = new THREE.PlaneGeometry(5000, 5000);
     const floorMaterial = new THREE.MeshStandardMaterial({
-        color: 0x111111,
-        roughness: 0.1,
-        metalness: 0.5
+        map: floorTexture,
+        bumpMap: floorBump,
+        bumpScale: 1.5, // Increased to make texture pop
+        roughness: 0.95,
+        metalness: 0.02,
+        color: 0x2f2f2f
     });
     const floor = new THREE.Mesh(floorGeometry, floorMaterial);
     floor.rotation.x = -Math.PI / 2;
-    floor.position.y = -60; // Below TV
+    floor.position.y = -180;
     floor.receiveShadow = true;
     scene.add(floor);
+
+    // Wall using same texture, rotated to avoid identical tiling
+    const wallTexture = floorTexture.clone();
+    wallTexture.wrapS = THREE.RepeatWrapping;
+    wallTexture.wrapT = THREE.RepeatWrapping;
+    wallTexture.repeat.set(4, 2.5);
+    wallTexture.rotation = Math.PI / 2;
+    wallTexture.center.set(0.5, 0.5);
+    wallTexture.anisotropy = floorTexture.anisotropy;
+    wallTexture.encoding = THREE.sRGBEncoding;
+
+    const wallBump = wallTexture.clone();
+    wallBump.encoding = THREE.LinearEncoding;
+    wallBump.wrapS = THREE.RepeatWrapping;
+    wallBump.wrapT = THREE.RepeatWrapping;
+    wallBump.repeat.copy(wallTexture.repeat);
+    wallBump.rotation = wallTexture.rotation;
+    wallBump.center.copy(wallTexture.center);
+
+    const wallGeometry = new THREE.PlaneGeometry(5000, 2500);
+    const wallMaterial = new THREE.MeshStandardMaterial({
+        map: wallTexture,
+        bumpMap: wallBump,
+        bumpScale: 0.8,
+        roughness: 0.95,
+        metalness: 0.03,
+        color: 0x1b1b1b
+    });
+    const wall = new THREE.Mesh(wallGeometry, wallMaterial);
+    wall.position.set(0, 300, -900);
+    wall.receiveShadow = true;
+    scene.add(wall);
+}
+
+function createGrainTexture() {
+    const canvas = document.createElement('canvas');
+    canvas.width = 512;
+    canvas.height = 512;
+    const ctx = canvas.getContext('2d');
+
+    // Fill with base grey
+    ctx.fillStyle = '#808080';
+    ctx.fillRect(0, 0, 512, 512);
+
+    // Add noise
+    const imageData = ctx.getImageData(0, 0, 512, 512);
+    const data = imageData.data;
+    for (let i = 0; i < data.length; i += 4) {
+        const noise = (Math.random() - 0.5) * 40; // Intensity
+        data[i] += noise;
+        data[i + 1] += noise;
+        data[i + 2] += noise;
+    }
+    ctx.putImageData(imageData, 0, 0);
+
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.wrapS = THREE.RepeatWrapping;
+    texture.wrapT = THREE.RepeatWrapping;
+    return texture;
 }
 
 function createProceduralTV() {
     tvGroup = new THREE.Group();
+    tvGroup.position.set(0, -160, -600);
 
-    // Materials
-    const bodyMaterial = new THREE.MeshStandardMaterial({
-        color: 0x1a1a1a, // Dark grey plastic
-        roughness: 0.6,
-        metalness: 0.1
+    // Generate Grain Texture for realism
+    const grainTexture = createGrainTexture();
+    grainTexture.repeat.set(2, 2);
+
+    // High-Quality Plastic Material with Texture
+    const bodyMaterial = new THREE.MeshPhysicalMaterial({
+        color: 0x181818, // Darker plastic
+        roughness: 0.78,
+        roughnessMap: grainTexture,
+        bumpMap: grainTexture,
+        bumpScale: 0.25,
+        metalness: 0.12,
+        clearcoat: 0.08,
+        clearcoatRoughness: 0.45
     });
 
-    const bezelMaterial = new THREE.MeshStandardMaterial({
-        color: 0x050505, // Black bezel
-        roughness: 0.2,
-        metalness: 0.5
+    const bezelMaterial = new THREE.MeshPhysicalMaterial({
+        color: 0x0a0a0a,
+        roughness: 0.5,
+        roughnessMap: grainTexture,
+        bumpMap: grainTexture,
+        bumpScale: 0.12,
+        metalness: 0.25,
+        clearcoat: 0.2,
+        clearcoatRoughness: 0.25
     });
 
-    // 1. Main Body (Box)
-    const bodyGeom = new THREE.BoxGeometry(140, 100, 80);
+    // 1. Main Body (Rounded Box)
+    // Requires RoundedBoxGeometry from examples
+    let bodyGeom;
+    if (THREE.RoundedBoxGeometry) {
+        bodyGeom = new THREE.RoundedBoxGeometry(140, 100, 80, 4, 2); // w, h, d, segments, radius
+    } else {
+        bodyGeom = new THREE.BoxGeometry(140, 100, 80);
+    }
     const body = new THREE.Mesh(bodyGeom, bodyMaterial);
     body.castShadow = true;
+    body.receiveShadow = true;
     tvGroup.add(body);
 
-    // 2. Screen Bezel (Slightly smaller box, extruded front)
-    const bezelGeom = new THREE.BoxGeometry(130, 90, 5);
+    // 2. Screen Bezel (Rounded Box)
+    let bezelGeom;
+    if (THREE.RoundedBoxGeometry) {
+        bezelGeom = new THREE.RoundedBoxGeometry(130, 90, 5, 4, 1);
+    } else {
+        bezelGeom = new THREE.BoxGeometry(130, 90, 5);
+    }
     const bezel = new THREE.Mesh(bezelGeom, bezelMaterial);
-    bezel.position.z = 40; // Front of body
+    bezel.position.z = 40;
     bezel.castShadow = true;
+    bezel.receiveShadow = true;
     tvGroup.add(bezel);
 
     // 3. Screen (Plane with Static Shader)
@@ -287,6 +401,40 @@ function createProceduralTV() {
     scene.add(tvGroup);
 }
 
+function createLighting() {
+    // Ambient light - Increased slightly to reveal floor texture
+    const ambient = new THREE.AmbientLight(0xffffff, 0.1);
+    scene.add(ambient);
+
+    // 1. Key Light (Main Source) - High and to the right
+    // Widened angle to ensure it hits the foreground floor
+    const keyLight = new THREE.SpotLight(0xfff0dd, 2000);
+    keyLight.position.set(500, 1000, 500);
+    keyLight.angle = Math.PI / 3; // Wider angle
+    keyLight.penumbra = 0.5;
+    keyLight.decay = 2;
+    keyLight.distance = 4000;
+    keyLight.castShadow = true;
+    keyLight.shadow.bias = -0.0001;
+    keyLight.shadow.mapSize.width = 2048;
+    keyLight.shadow.mapSize.height = 2048;
+    scene.add(keyLight);
+
+    // 2. Rim Light (Backlight)
+    const rimLight = new THREE.SpotLight(0x4455ff, 1000);
+    rimLight.position.set(0, 500, -500);
+    rimLight.lookAt(0, 0, 0);
+    rimLight.decay = 2;
+    rimLight.distance = 3000;
+    scene.add(rimLight);
+
+    // 3. Fill Light (Front)
+    const fillLight = new THREE.PointLight(0xcceeff, 200, 2000);
+    fillLight.position.set(-300, 100, 400);
+    fillLight.decay = 2;
+    scene.add(fillLight);
+}
+
 function create3DText() {
     const canvas = document.createElement('canvas');
     const ctx = canvas.getContext('2d');
@@ -298,15 +446,19 @@ function create3DText() {
     ctx.font = 'bold 100px "Courier New", monospace';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.shadowColor = "rgba(255, 255, 255, 0.8)";
-    ctx.shadowBlur = 20;
+    ctx.shadowBlur = 0;
     ctx.fillText('FRESH PRODUCE', canvas.width / 2, canvas.height / 2);
 
     const textTexture = new THREE.CanvasTexture(canvas);
     const textMaterial = new THREE.MeshBasicMaterial({ map: textTexture, transparent: true });
     const textGeometry = new THREE.PlaneGeometry(100, 25);
     textMesh = new THREE.Mesh(textGeometry, textMaterial);
-    textMesh.position.set(0, -60, 40); // Below TV screen, front aligned
+
+    // Adjusted Position: Higher and Forward to avoid clipping floor
+    textMesh.position.set(0, -55, 60);
+    // Tilted slightly up to face camera
+    textMesh.rotation.x = -Math.PI / 12;
+
     tvGroup.add(textMesh);
 }
 
@@ -387,10 +539,8 @@ function onScroll(event) {
         scrollZ += event.deltaY * 0.5;
         if (scrollZ < 0) scrollZ = 0;
 
-        // Dolly Camera
-        // Move from 800 to 42.5 (screen Z)
-        // We want to stop JUST before hitting the screen
-        const targetZ = 800 - (scrollZ * 0.8);
+        // Dolly Camera toward the TV
+        const targetZ = 950 - (scrollZ * 0.8);
 
         // Smooth camera movement
         camera.position.z += (targetZ - camera.position.z) * 0.1;
