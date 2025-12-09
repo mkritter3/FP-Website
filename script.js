@@ -16,9 +16,10 @@ const radius = 1000;
 
 // Scroll State
 let scrollZ = 0;
-const maxZ = 1500; // Longer scroll for dolly
-const transitionZ = 1200; // Point where transition starts
+const maxZ = 2500;           // Extended dolly distance
+const screenPlaneZ = -557;   // Z position of screen in world space
 let inIntro = true;
+let transitioning = false;   // For black frame beat
 
 // Static Shader Uniforms
 const staticUniforms = {
@@ -57,10 +58,10 @@ function init() {
         scene.background = new THREE.Color(0x050505);
         scene.fog = new THREE.FogExp2(0x050505, 0.00045); // Light haze for depth, not blur
 
-        // Camera
+        // Camera - One-point perspective, centered on TV
         camera = new THREE.PerspectiveCamera(48, window.innerWidth / window.innerHeight, 0.1, 4000);
-        camera.position.set(0, -40, 950); // Low, longer lens feel
-        camera.lookAt(0, 0, 0);
+        camera.position.set(0, -130, 950); // Same height as TV center for one-point perspective
+        camera.lookAt(0, -130, -600);      // Look straight at TV
 
         // Renderer
         renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false, powerPreference: "high-performance" });
@@ -483,36 +484,72 @@ function createSmokeShader() {
 // --- Interaction Logic ---
 
 function onScroll(event) {
+    if (transitioning) return; // Block during black frame
+
     if (inIntro) {
         event.preventDefault();
         scrollZ += event.deltaY * 0.5;
-        if (scrollZ < 0) scrollZ = 0;
+        scrollZ = Math.max(0, Math.min(scrollZ, maxZ));
 
-        // Dolly Camera toward the TV
-        const targetZ = 950 - (scrollZ * 0.8);
+        // Calculate progress (0 to 1)
+        const progress = scrollZ / maxZ;
 
-        // Smooth camera movement
-        camera.position.z += (targetZ - camera.position.z) * 0.1;
+        // Dolly camera from z=950 all the way THROUGH the screen
+        // Start z=950, end z=-650 (well past screen plane at -557)
+        const startZ = 950;
+        const endZ = -650;
 
-        // Slight rotation for "looking at" effect
-        camera.lookAt(0, 0, 0);
+        // Ease-in-out for cinematic feel
+        const easeProgress = progress < 0.5
+            ? 2 * progress * progress
+            : 1 - Math.pow(-2 * progress + 2, 2) / 2;
 
-        // Transition Logic
-        if (scrollZ > transitionZ) {
-            const progress = (scrollZ - transitionZ) / (maxZ - transitionZ);
-            const opacity = 1 - Math.min(1, progress);
+        const targetZ = startZ + (endZ - startZ) * easeProgress;
+        camera.position.z = targetZ;
 
-            renderer.domElement.style.opacity = opacity;
+        // Keep looking straight at TV (one-point perspective)
+        camera.lookAt(0, -130, -600);
 
-            if (scrollZ > maxZ) {
-                completeIntro();
-            }
-        } else {
-            renderer.domElement.style.opacity = 1;
+        // When camera passes THROUGH the screen plane, trigger transition
+        // Screen plane is at z=-557.5, trigger when camera goes past it
+        if (camera.position.z <= screenPlaneZ && inIntro) {
+            triggerBlackFrameTransition();
         }
     } else {
         handleSpiralScroll(event.deltaY);
     }
+}
+
+// Black frame beat before spiral
+function triggerBlackFrameTransition() {
+    transitioning = true;
+    inIntro = false;
+
+    // Instant cut to black - hide 3D canvas immediately
+    document.getElementById('canvas-container').style.display = 'none';
+
+    // Show black screen (spiral view with opacity 0 initially)
+    const spiralView = document.querySelector('.spiral-view');
+    spiralView.classList.add('visible');
+    spiralView.style.opacity = '0'; // Pure black
+
+    // After black frame, make spiral visible but positioned below screen
+    setTimeout(() => {
+        spiralView.style.opacity = '1';
+        spiralView.classList.add('active');
+        initSpiralStartPosition();
+        transitioning = false;
+    }, 80); // Brief black frame
+}
+
+// Initialize spiral at starting position - far below screen
+// User must scroll to bring it up
+function initSpiralStartPosition() {
+    const helixRadius = 600;
+    carouselTrack.dataset.scrollY = -600; // Start way below
+    rotation = 0;
+    // Position helix far below so cards scroll in from bottom
+    carouselTrack.style.transform = `translateZ(-${helixRadius}px) translateY(600px) rotateY(0deg)`;
 }
 
 function completeIntro() {
@@ -522,7 +559,7 @@ function completeIntro() {
     document.querySelector('.spiral-view').classList.add('active');
 }
 
-// --- Spiral Logic (Vertical Helix) ---
+// --- Spiral Logic (Single-Strand DNA Helix) ---
 
 function initSpiral() {
     let spiralView = document.querySelector('.spiral-view');
@@ -540,9 +577,10 @@ function initSpiral() {
     carouselTrack.className = 'carousel-track';
     carouselContainer.appendChild(carouselTrack);
 
-    const cardHeight = 216;
-    const verticalGap = 50;
-    const spiralHeightPerItem = cardHeight + verticalGap;
+    // DNA Helix parameters
+    const helixRadius = 600;        // Tighter than before for drill feel
+    const verticalPitch = 350;      // Vertical distance per card
+    const totalCards = carouselData.length;
 
     carouselData.forEach((item, index) => {
         const card = document.createElement('div');
@@ -555,11 +593,15 @@ function initSpiral() {
             </div>
         `;
 
-        const angle = (index / carouselData.length) * Math.PI * 2;
-        const x = Math.sin(angle) * radius;
-        const z = Math.cos(angle) * radius;
-        const y = index * spiralHeightPerItem;
-        const rotationY = angle * (180 / Math.PI);
+        // Single helix: each card spirals upward
+        // Full rotation spread across cards for continuous spiral effect
+        const angle = (index / totalCards) * Math.PI * 2 * 2; // 2 full rotations total
+        const x = Math.sin(angle) * helixRadius;
+        const z = Math.cos(angle) * helixRadius - helixRadius; // Center behind viewer
+        const y = index * verticalPitch; // Spiral upward
+
+        // Face outward from helix center (perpendicular to radius)
+        const rotationY = (angle * 180 / Math.PI) + 90;
 
         card.style.transform = `translate3d(${x}px, ${y}px, ${z}px) rotateY(${rotationY}deg)`;
         carouselTrack.appendChild(card);
@@ -567,14 +609,63 @@ function initSpiral() {
 }
 
 function handleSpiralScroll(delta) {
-    rotation -= delta * 0.002;
-    const verticalMove = delta * 0.5;
-
+    // Track spiral scroll position
     if (!carouselTrack.dataset.scrollY) carouselTrack.dataset.scrollY = 0;
-    let currentY = parseFloat(carouselTrack.dataset.scrollY) - verticalMove;
+    let currentY = parseFloat(carouselTrack.dataset.scrollY) + delta * 0.6;
+
+    // If scrolling back past the start, reverse to TV scene
+    if (currentY < -100 && delta < 0) {
+        triggerReverseTransition();
+        return;
+    }
+
     carouselTrack.dataset.scrollY = currentY;
 
-    carouselTrack.style.transform = `translateZ(-${radius}px) translateY(${currentY}px) rotateY(${rotation}deg)`;
+    // Rotate the helix (drilling motion)
+    rotation += delta * 0.002;
+
+    // Combined transform: translate (move through) + rotate (drill) = ascending helix
+    const helixRadius = 600;
+    carouselTrack.style.transform =
+        `translateZ(-${helixRadius}px) translateY(${-currentY}px) rotateY(${rotation}rad)`;
+}
+
+// Reverse transition back to TV scene
+function triggerReverseTransition() {
+    if (transitioning) return;
+    transitioning = true;
+
+    // Hide spiral instantly - cut to black
+    const spiralView = document.querySelector('.spiral-view');
+    spiralView.style.opacity = '0';
+
+    // Brief black frame beat
+    setTimeout(() => {
+        spiralView.classList.remove('active', 'visible');
+
+        // Show canvas again
+        const canvasContainer = document.getElementById('canvas-container');
+        canvasContainer.style.display = 'block';
+        canvasContainer.style.opacity = '1';
+
+        // Reset scroll state - position camera just before screen plane
+        // Calculate scrollZ that puts camera just before screen plane
+        const startZ = 950;
+        const endZ = -650;
+        const targetCameraZ = screenPlaneZ + 50; // Just before screen
+        // Reverse the easing math to find scrollZ
+        // For simplicity, estimate scrollZ at about 70% progress
+        scrollZ = maxZ * 0.68;
+        inIntro = true;
+        transitioning = false;
+
+        // Update camera position
+        const progress = scrollZ / maxZ;
+        const easeProgress = progress < 0.5
+            ? 2 * progress * progress
+            : 1 - Math.pow(-2 * progress + 2, 2) / 2;
+        camera.position.z = startZ + (endZ - startZ) * easeProgress;
+    }, 80);
 }
 
 // --- Animation Loop ---
