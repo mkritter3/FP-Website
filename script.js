@@ -69,7 +69,7 @@ function init() {
         renderer.shadowMap.enabled = true;
         renderer.shadowMap.type = THREE.PCFSoftShadowMap;
         renderer.toneMapping = THREE.ACESFilmicToneMapping; // Cinematic tone mapping
-        renderer.toneMappingExposure = 0.9;
+        renderer.toneMappingExposure = 0.8; // Balanced exposure
         container.appendChild(renderer.domElement);
 
         // Post-processing
@@ -142,52 +142,33 @@ function setupPostProcessing() {
 }
 
 function createLighting() {
-    // Minimal ambient to keep blacks rich
-    const ambient = new THREE.AmbientLight(0xffffff, 0.02);
+    // Ambient light - low for moody look
+    const ambient = new THREE.AmbientLight(0xffffff, 0.05);
     scene.add(ambient);
 
-    // Primary beam coming from the TV screen direction, casting long shadows
-    const beam = new THREE.SpotLight(0xffffff, 420, 2000, Math.PI / 10, 0.7, 2.0);
-    beam.position.set(0, -120, -560);
-    beam.castShadow = true;
-    beam.shadow.bias = -0.00008;
-    beam.shadow.mapSize.width = 4096;
-    beam.shadow.mapSize.height = 4096;
-    beam.target.position.set(0, -200, 150); // Aim toward mid-ground, not the camera
-    scene.add(beam);
-    scene.add(beam.target);
-
-    // Subtle bounce to lift deep blacks just a hair
-    const bounce = new THREE.HemisphereLight(0x0d0f12, 0x050505, 0.05);
+    // Hemisphere - dark from above, darker from below
+    const bounce = new THREE.HemisphereLight(0x222233, 0x000000, 0.15);
     scene.add(bounce);
 }
 
 function createEnvironment() {
     const textureLoader = new THREE.TextureLoader();
 
-    // Load and prep floor texture
+    // Load floor texture (tiled)
     const floorTexture = textureLoader.load('assets/floor-texture-map-no-light.png');
     floorTexture.wrapS = THREE.RepeatWrapping;
     floorTexture.wrapT = THREE.RepeatWrapping;
-    floorTexture.repeat.set(6, 6);
+    floorTexture.repeat.set(8, 8);
     floorTexture.anisotropy = Math.min(renderer.capabilities.getMaxAnisotropy(), MAX_ANISOTROPY);
     floorTexture.encoding = THREE.sRGBEncoding;
 
-    const floorBump = floorTexture.clone();
-    floorBump.encoding = THREE.LinearEncoding;
-    floorBump.wrapS = THREE.RepeatWrapping;
-    floorBump.wrapT = THREE.RepeatWrapping;
-    floorBump.repeat.copy(floorTexture.repeat);
-
-    // Floor plane
+    // Floor plane - dark concrete
     const floorGeometry = new THREE.PlaneGeometry(5000, 5000);
     const floorMaterial = new THREE.MeshStandardMaterial({
         map: floorTexture,
-        bumpMap: floorBump,
-        bumpScale: 1.5, // Increased to make texture pop
-        roughness: 0.95,
-        metalness: 0.02,
-        color: 0x2f2f2f
+        color: 0x333333,    // Tint the texture darker
+        roughness: 0.9,
+        metalness: 0.0
     });
     const floor = new THREE.Mesh(floorGeometry, floorMaterial);
     floor.rotation.x = -Math.PI / 2;
@@ -195,32 +176,20 @@ function createEnvironment() {
     floor.receiveShadow = true;
     scene.add(floor);
 
-    // Wall using same texture, rotated to avoid identical tiling
-    const wallTexture = floorTexture.clone();
+    // Wall using flat texture (no pre-baked lighting)
+    const wallTexture = textureLoader.load('assets/floor-texture-map-no-light.png');
     wallTexture.wrapS = THREE.RepeatWrapping;
     wallTexture.wrapT = THREE.RepeatWrapping;
-    wallTexture.repeat.set(4, 2.5);
-    wallTexture.rotation = Math.PI / 2;
-    wallTexture.center.set(0.5, 0.5);
-    wallTexture.anisotropy = floorTexture.anisotropy;
+    wallTexture.repeat.set(3, 2);
+    wallTexture.anisotropy = Math.min(renderer.capabilities.getMaxAnisotropy(), MAX_ANISOTROPY);
     wallTexture.encoding = THREE.sRGBEncoding;
-
-    const wallBump = wallTexture.clone();
-    wallBump.encoding = THREE.LinearEncoding;
-    wallBump.wrapS = THREE.RepeatWrapping;
-    wallBump.wrapT = THREE.RepeatWrapping;
-    wallBump.repeat.copy(wallTexture.repeat);
-    wallBump.rotation = wallTexture.rotation;
-    wallBump.center.copy(wallTexture.center);
 
     const wallGeometry = new THREE.PlaneGeometry(5000, 2500);
     const wallMaterial = new THREE.MeshStandardMaterial({
         map: wallTexture,
-        bumpMap: wallBump,
-        bumpScale: 0.8,
-        roughness: 0.95,
-        metalness: 0.03,
-        color: 0x1b1b1b
+        roughness: 0.9,
+        metalness: 0.02,
+        color: 0x151515   // Dark wall
     });
     const wall = new THREE.Mesh(wallGeometry, wallMaterial);
     wall.position.set(0, 300, -900);
@@ -257,7 +226,7 @@ function createGrainTexture() {
 
 function createProceduralTV() {
     tvGroup = new THREE.Group();
-    tvGroup.position.set(0, -160, -600);
+    tvGroup.position.set(0, -130, -600); // Raised to sit on floor (body height 100, floor at y=-180)
 
     // Generate Grain Texture for realism
     const grainTexture = createGrainTexture();
@@ -349,7 +318,7 @@ function createProceduralTV() {
 
                 float noise = random(uv * 500.0 + time * 50.0);
                 float scanline = sin(uv.y * 200.0 + time * 10.0) * 0.05;
-                vec3 color = vec3(noise * 0.8 + scanline);
+                vec3 color = vec3(noise * 1.3 + scanline + 0.1); // Brighter screen
                 
                 // Vignette
                 vec2 v = uv * 2.0 - 1.0;
@@ -378,6 +347,18 @@ function createProceduralTV() {
     screenMesh.position.z = 42.5; // Slightly in front of bezel
     tvGroup.add(screenMesh);
 
+    // Screen glow - ambient light from TV screen
+    const screenGlow = new THREE.PointLight(0xeeeeff, 30, 300, 2);
+    screenGlow.position.set(0, 0, 45); // At screen surface
+    tvGroup.add(screenGlow);
+
+    // Forward light path - SpotLight casting towards viewer
+    const forwardLight = new THREE.SpotLight(0xddeeff, 60, 800, Math.PI / 6, 0.6, 2);
+    forwardLight.position.set(0, -20, 50); // Bottom of screen, facing forward
+    forwardLight.target.position.set(0, -100, 400); // Aim forward and down
+    tvGroup.add(forwardLight);
+    tvGroup.add(forwardLight.target);
+
     // 4. Knobs/Dials (Side Panel)
     const knobGeom = new THREE.CylinderGeometry(4, 4, 5, 32);
     const knobMat = new THREE.MeshStandardMaterial({ color: 0x333333, metalness: 0.8, roughness: 0.2 });
@@ -401,39 +382,7 @@ function createProceduralTV() {
     scene.add(tvGroup);
 }
 
-function createLighting() {
-    // Ambient light - Increased slightly to reveal floor texture
-    const ambient = new THREE.AmbientLight(0xffffff, 0.1);
-    scene.add(ambient);
-
-    // 1. Key Light (Main Source) - High and to the right
-    // Widened angle to ensure it hits the foreground floor
-    const keyLight = new THREE.SpotLight(0xfff0dd, 2000);
-    keyLight.position.set(500, 1000, 500);
-    keyLight.angle = Math.PI / 3; // Wider angle
-    keyLight.penumbra = 0.5;
-    keyLight.decay = 2;
-    keyLight.distance = 4000;
-    keyLight.castShadow = true;
-    keyLight.shadow.bias = -0.0001;
-    keyLight.shadow.mapSize.width = 2048;
-    keyLight.shadow.mapSize.height = 2048;
-    scene.add(keyLight);
-
-    // 2. Rim Light (Backlight)
-    const rimLight = new THREE.SpotLight(0x4455ff, 1000);
-    rimLight.position.set(0, 500, -500);
-    rimLight.lookAt(0, 0, 0);
-    rimLight.decay = 2;
-    rimLight.distance = 3000;
-    scene.add(rimLight);
-
-    // 3. Fill Light (Front)
-    const fillLight = new THREE.PointLight(0xcceeff, 200, 2000);
-    fillLight.position.set(-300, 100, 400);
-    fillLight.decay = 2;
-    scene.add(fillLight);
-}
+// NOTE: createLighting() is defined earlier in the file (line 144)
 
 function create3DText() {
     const canvas = document.createElement('canvas');
