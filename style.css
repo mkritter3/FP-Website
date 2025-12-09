@@ -265,10 +265,8 @@ nav a:hover {
     left: -400px;
     top: -250px;
 
-    /* Frosted glass effect */
-    background: rgba(255, 255, 255, 0.08);
-    backdrop-filter: blur(20px);
-    -webkit-backdrop-filter: blur(20px);
+    /* Frosted glass effect - NO backdrop-filter (breaks 3D context) */
+    background: rgba(30, 30, 35, 0.85);
     border: 1px solid rgba(255, 255, 255, 0.15);
     border-radius: 16px;
 
@@ -278,8 +276,8 @@ nav a:hover {
         0 0 0 1px rgba(255, 255, 255, 0.05) inset,
         0 1px 0 rgba(255, 255, 255, 0.1) inset;
 
-    overflow: hidden;
-    backface-visibility: visible; /* Show back of card */
+    overflow: visible; /* Allow 3D edges to show */
+    backface-visibility: visible;
     transform-style: preserve-3d;
 
     /* No transform transition - JS handles smooth animation */
@@ -299,8 +297,32 @@ nav a:hover {
     background: linear-gradient(135deg, rgba(30, 30, 35, 0.95) 0%, rgba(15, 15, 20, 0.98) 100%);
     border-radius: 16px;
     backface-visibility: hidden;
-    transform: rotateY(180deg);
+    transform: rotateY(180deg) translateZ(1px);
     z-index: -1;
+}
+
+/* 3D Glass shard edges - DRAMATIC for testing */
+.card-edge {
+    position: absolute;
+    top: 0;
+    height: 100%;
+    background: rgba(255, 100, 100, 0.9);
+    transform-style: preserve-3d;
+    backface-visibility: visible;
+}
+
+.card-edge-right {
+    right: 0;
+    width: 40px;
+    transform: rotateY(90deg);
+    transform-origin: right center;
+}
+
+.card-edge-left {
+    left: 0;
+    width: 40px;
+    transform: rotateY(-90deg);
+    transform-origin: left center;
 }
 
 .carousel-card.visible {

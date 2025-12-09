@@ -27,6 +27,11 @@ let focusProgress = 0;        // Current interpolated focus position
 let targetFocusProgress = 0;  // Target focus position from scroll
 let carouselAnimating = false;
 
+// 3D Spiral Cards (Three.js)
+let spiralGroup;
+let card3DArray = [];
+let inSpiral3D = false;  // Track if we're in 3D spiral mode
+
 // Static Shader Uniforms
 const staticUniforms = {
     time: { value: 0 },
@@ -106,7 +111,8 @@ function init() {
         window.addEventListener('wheel', onScroll, { passive: false });
 
         // Initialize Spiral (Hidden initially)
-        initSpiral();
+        initSpiral();      // Legacy HTML version (fallback)
+        initSpiral3D();    // New Three.js 3D version
 
         // Start Loop
         animate();
@@ -540,19 +546,32 @@ function triggerBlackFrameTransition() {
     // Store exact scrollZ for symmetrical reverse transition
     transitionScrollZ = scrollZ;
 
-    // Instant cut to black - hide 3D canvas immediately
-    document.getElementById('canvas-container').style.display = 'none';
+    // Brief black frame, then show 3D spiral
+    const canvasContainer = document.getElementById('canvas-container');
 
-    // Show black screen (spiral view with opacity 0 initially)
-    const spiralView = document.querySelector('.spiral-view');
-    spiralView.classList.add('visible');
-    spiralView.style.opacity = '0'; // Pure black
+    // Fade to black briefly
+    canvasContainer.style.opacity = '0';
 
-    // After black frame, make spiral visible but positioned below screen
     setTimeout(() => {
-        spiralView.style.opacity = '1';
-        spiralView.classList.add('active');
-        initSpiralStartPosition();
+        // Hide HTML spiral view (not using it anymore)
+        const spiralView = document.querySelector('.spiral-view');
+        if (spiralView) spiralView.style.display = 'none';
+
+        // Show 3D spiral group
+        spiralGroup.visible = true;
+        inSpiral3D = true;
+
+        // Reposition camera for spiral viewing
+        camera.position.set(0, -130, -580);  // Just past TV screen
+        camera.lookAt(0, -130, -600);        // Look at spiral center
+
+        // Initialize spiral positions
+        focusProgress = -4;
+        targetFocusProgress = -4;
+        updateCard3DPositions(focusProgress);
+
+        // Fade back in
+        canvasContainer.style.opacity = '1';
         transitioning = false;
     }, 80); // Brief black frame
 }
@@ -573,7 +592,115 @@ function completeIntro() {
     document.querySelector('.spiral-view').classList.add('active');
 }
 
-// --- Spiral Logic (Zero-Gravity Diagonal Showcase) ---
+// --- 3D Spiral Cards (Three.js) ---
+
+function create3DCard(data, index) {
+    const group = new THREE.Group();
+
+    // Card dimensions (world units) - 1.75x size
+    const width = 14;      // ~800px equivalent * 1.75
+    const height = 8.75;   // ~500px equivalent * 1.75
+    const depth = 0.5;     // Glass shard thickness
+
+    // Main card body - BoxGeometry for true 3D
+    const geometry = new THREE.BoxGeometry(width, height, depth);
+
+    // Create materials for each face
+    const cardColor = new THREE.Color(data.color);
+
+    // Front face - frosted glass with color
+    const frontMaterial = new THREE.MeshPhysicalMaterial({
+        color: cardColor,
+        metalness: 0.1,
+        roughness: 0.3,
+        transparent: true,
+        opacity: 0.9,
+        clearcoat: 0.5,
+        clearcoatRoughness: 0.3,
+    });
+
+    // Edge material - darker, more reflective
+    const edgeMaterial = new THREE.MeshStandardMaterial({
+        color: 0x1a1a1f,
+        metalness: 0.4,
+        roughness: 0.2,
+    });
+
+    // Back face - darker matte
+    const backMaterial = new THREE.MeshStandardMaterial({
+        color: 0x0a0a0c,
+        metalness: 0.1,
+        roughness: 0.8,
+    });
+
+    // Materials for each face: [right, left, top, bottom, front, back]
+    const materials = [
+        edgeMaterial,    // right
+        edgeMaterial,    // left
+        edgeMaterial,    // top
+        edgeMaterial,    // bottom
+        frontMaterial,   // front
+        backMaterial     // back
+    ];
+
+    const mesh = new THREE.Mesh(geometry, materials);
+    group.add(mesh);
+    group.userData = { index, data, frontMaterial };
+
+    return group;
+}
+
+function initSpiral3D() {
+    spiralGroup = new THREE.Group();
+    spiralGroup.position.set(0, -130, -600);  // Position in front of where camera will be
+    scene.add(spiralGroup);
+
+    // Initially hidden
+    spiralGroup.visible = false;
+
+    // Create all cards
+    carouselData.forEach((data, index) => {
+        const card = create3DCard(data, index);
+        card3DArray.push(card);
+        spiralGroup.add(card);
+    });
+
+    // Initial positioning
+    updateCard3DPositions(-4);
+}
+
+function updateCard3DPositions(progress) {
+    const towerRadius = 14;        // World units - 1.75x
+    const verticalSpacing = 15.75; // World units - 1.75x
+    const anglePerCard = Math.PI / 2;  // 90 degrees
+
+    card3DArray.forEach((card, index) => {
+        const offset = index - progress;
+        const angle = offset * anglePerCard;
+
+        // Helical position
+        const x = Math.sin(angle) * towerRadius;
+        const z = Math.cos(angle) * towerRadius - towerRadius;
+        const y = -offset * verticalSpacing;  // Negative so cards come from below
+
+        card.position.set(x, y, z);
+        card.rotation.y = angle;
+        card.rotation.x = offset * -0.035;  // Subtle tilt
+
+        // Scale based on distance
+        const dist = Math.abs(offset);
+        const scale = Math.max(0.6, 1.0 - dist * 0.06);
+        card.scale.setScalar(scale);
+
+        // Opacity via material
+        const targetOpacity = Math.max(0.3, 1 - dist * 0.15);
+        if (card.userData.frontMaterial) {
+            card.userData.frontMaterial.opacity = targetOpacity;
+        }
+    });
+}
+
+// --- Spiral Logic (Zero-Gravity Diagonal Showcase) - LEGACY HTML VERSION ---
 
 function initSpiral() {
     let spiralView = document.querySelector('.spiral-view');
@@ -616,6 +743,66 @@ function initSpiral() {
         content.appendChild(title);
         card.appendChild(imagePlaceholder);
         card.appendChild(content);
+
+        // Add 3D edge elements for glass shard depth
+        // Key: position OUTSIDE the card, rotate around the edge that touches the card
+        const edgeDepth = 30; // thickness in pixels
+
+        const rightEdge = document.createElement('div');
+        rightEdge.style.cssText = `
+            position: absolute;
+            top: 0;
+            left: 100%;
+            width: ${edgeDepth}px;
+            height: 100%;
+            background: linear-gradient(to right, rgba(60,60,70,0.9), rgba(20,20,25,0.9));
+            transform: rotateY(90deg);
+            transform-origin: left center;
+            border-radius: 0 8px 8px 0;
+        `;
+        card.appendChild(rightEdge);
+
+        const leftEdge = document.createElement('div');
+        leftEdge.style.cssText = `
+            position: absolute;
+            top: 0;
+            right: 100%;
+            width: ${edgeDepth}px;
+            height: 100%;
+            background: linear-gradient(to left, rgba(60,60,70,0.9), rgba(20,20,25,0.9));
+            transform: rotateY(-90deg);
+            transform-origin: right center;
+            border-radius: 8px 0 0 8px;
+        `;
+        card.appendChild(leftEdge);
+
+        const topEdge = document.createElement('div');
+        topEdge.style.cssText = `
+            position: absolute;
+            bottom: 100%;
+            left: 0;
+            width: 100%;
+            height: ${edgeDepth}px;
+            background: linear-gradient(to top, rgba(80,80,90,0.9), rgba(40,40,45,0.9));
+            transform: rotateX(-90deg);
+            transform-origin: bottom center;
+            border-radius: 8px 8px 0 0;
+        `;
+        card.appendChild(topEdge);
+
+        const bottomEdge = document.createElement('div');
+        bottomEdge.style.cssText = `
+            position: absolute;
+            top: 100%;
+            left: 0;
+            width: 100%;
+            height: ${edgeDepth}px;
+            background: linear-gradient(to bottom, rgba(30,30,35,0.9), rgba(10,10,12,0.9));
+            transform: rotateX(90deg);
+            transform-origin: top center;
+            border-radius: 0 0 8px 8px;
+        `;
+        card.appendChild(bottomEdge);
 
         carouselTrack.appendChild(card);
     });
@@ -690,7 +877,12 @@ function animateCarousel() {
     const diff = targetFocusProgress - focusProgress;
     focusProgress += diff * 0.04; // Slightly faster for better path visibility
 
-    updateCardPositions(focusProgress);
+    // Update appropriate system based on mode
+    if (inSpiral3D) {
+        updateCard3DPositions(focusProgress);
+    } else {
+        updateCardPositions(focusProgress);
+    }
     requestAnimationFrame(animateCarousel);
 }
 
@@ -716,18 +908,25 @@ function triggerReverseTransition() {
     if (transitioning) return;
     transitioning = true;
 
-    // Hide spiral instantly - cut to black
-    const spiralView = document.querySelector('.spiral-view');
-    spiralView.style.opacity = '0';
+    const canvasContainer = document.getElementById('canvas-container');
+
+    // Fade to black
+    canvasContainer.style.opacity = '0';
 
     // Brief black frame beat
     setTimeout(() => {
-        spiralView.classList.remove('active', 'visible');
+        // Hide 3D spiral
+        if (inSpiral3D) {
+            spiralGroup.visible = false;
+            inSpiral3D = false;
+        }
 
-        // Show canvas again with camera INSIDE the screen (past screen plane)
-        const canvasContainer = document.getElementById('canvas-container');
-        canvasContainer.style.display = 'block';
-        canvasContainer.style.opacity = '1';
+        // Also hide HTML spiral view if it was visible
+        const spiralView = document.querySelector('.spiral-view');
+        if (spiralView) {
+            spiralView.classList.remove('active', 'visible');
+            spiralView.style.display = 'none';
+        }
 
         // Use exact scrollZ from forward transition - symmetrical
         const startZ = 950;
@@ -744,6 +943,9 @@ function triggerReverseTransition() {
             : 1 - Math.pow(-2 * progress + 2, 2) / 2;
         camera.position.z = startZ + (endZ - startZ) * easeProgress;
         camera.lookAt(0, -130, -600);
+
+        // Fade back in
+        canvasContainer.style.opacity = '1';
     }, 80);
 }
 
