@@ -20,6 +20,7 @@ const maxZ = 2500;           // Extended dolly distance
 const screenPlaneZ = -557;   // Z position of screen in world space
 let inIntro = true;
 let transitioning = false;   // For black frame beat
+let transitionScrollZ = 0;   // Store exact scrollZ at transition for symmetrical reverse
 
 // Static Shader Uniforms
 const staticUniforms = {
@@ -386,30 +387,36 @@ function createProceduralTV() {
 // NOTE: createLighting() is defined earlier in the file (line 144)
 
 function create3DText() {
-    const canvas = document.createElement('canvas');
-    const ctx = canvas.getContext('2d');
-    canvas.width = 1024;
-    canvas.height = 256;
-    ctx.fillStyle = 'rgba(0,0,0,0)';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    ctx.fillStyle = '#ffffff';
-    ctx.font = 'bold 100px "Courier New", monospace';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.shadowBlur = 0;
-    ctx.fillText('FRESH PRODUCE', canvas.width / 2, canvas.height / 2);
+    const loader = new THREE.FontLoader();
 
-    const textTexture = new THREE.CanvasTexture(canvas);
-    const textMaterial = new THREE.MeshBasicMaterial({ map: textTexture, transparent: true });
-    const textGeometry = new THREE.PlaneGeometry(100, 25);
-    textMesh = new THREE.Mesh(textGeometry, textMaterial);
+    // Load a font and create 3D text geometry
+    loader.load('https://threejs.org/examples/fonts/helvetiker_bold.typeface.json', function(font) {
+        const textGeometry = new THREE.TextGeometry('FRESH PRODUCE', {
+            font: font,
+            size: 12,           // Smaller text
+            height: 0.5,        // Thin extrusion for subtle 3D
+            curveSegments: 12,
+            bevelEnabled: true,
+            bevelThickness: 0.1,
+            bevelSize: 0.05,
+            bevelSegments: 3
+        });
 
-    // Adjusted Position: Higher and Forward to avoid clipping floor
-    textMesh.position.set(0, -55, 60);
-    // Tilted slightly up to face camera
-    textMesh.rotation.x = -Math.PI / 12;
+        // Center the text geometry
+        textGeometry.computeBoundingBox();
+        const centerOffset = (textGeometry.boundingBox.max.x - textGeometry.boundingBox.min.x) / 2;
 
-    tvGroup.add(textMesh);
+        // Bright solid white material (not ghostly)
+        const textMaterial = new THREE.MeshBasicMaterial({
+            color: 0xffffff
+        });
+
+        textMesh = new THREE.Mesh(textGeometry, textMaterial);
+        // Position 10 units above floor, closer to camera
+        textMesh.position.set(-centerOffset, -170, 555);
+
+        scene.add(textMesh);
+    });
 }
 
 function createAntenna(parentGroup) {
@@ -525,6 +532,9 @@ function triggerBlackFrameTransition() {
     transitioning = true;
     inIntro = false;
 
+    // Store exact scrollZ for symmetrical reverse transition
+    transitionScrollZ = scrollZ;
+
     // Instant cut to black - hide 3D canvas immediately
     document.getElementById('canvas-container').style.display = 'none';
 
@@ -630,7 +640,7 @@ function handleSpiralScroll(delta) {
         `translateZ(-${helixRadius}px) translateY(${-currentY}px) rotateY(${rotation}rad)`;
 }
 
-// Reverse transition back to TV scene
+// Reverse transition back to TV scene - smooth pullback through screen
 function triggerReverseTransition() {
     if (transitioning) return;
     transitioning = true;
@@ -643,28 +653,26 @@ function triggerReverseTransition() {
     setTimeout(() => {
         spiralView.classList.remove('active', 'visible');
 
-        // Show canvas again
+        // Show canvas again with camera INSIDE the screen (past screen plane)
         const canvasContainer = document.getElementById('canvas-container');
         canvasContainer.style.display = 'block';
         canvasContainer.style.opacity = '1';
 
-        // Reset scroll state - position camera just before screen plane
-        // Calculate scrollZ that puts camera just before screen plane
+        // Use exact scrollZ from forward transition - symmetrical
         const startZ = 950;
         const endZ = -650;
-        const targetCameraZ = screenPlaneZ + 50; // Just before screen
-        // Reverse the easing math to find scrollZ
-        // For simplicity, estimate scrollZ at about 70% progress
-        scrollZ = maxZ * 0.68;
+
+        scrollZ = transitionScrollZ;
         inIntro = true;
         transitioning = false;
 
-        // Update camera position
+        // Set camera position to match stored scrollZ
         const progress = scrollZ / maxZ;
         const easeProgress = progress < 0.5
             ? 2 * progress * progress
             : 1 - Math.pow(-2 * progress + 2, 2) / 2;
         camera.position.z = startZ + (endZ - startZ) * easeProgress;
+        camera.lookAt(0, -130, -600);
     }, 80);
 }
 
