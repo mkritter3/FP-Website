@@ -1171,13 +1171,14 @@ function updateSpiralText(progress) {
     // This is when the text swap should happen - card is covering the text
     const cardIsCovering = highestZ > textZ && Math.abs(frontCardX) < 5;
 
-    // Update phrase based on progress (each integer = one card passed)
-    // Clamp to last phrase - no repeating
+    // Update phrase when each card passes (at integer progress boundaries)
+    // Offset by 1: progress 0 = first card passing = phrase 1
+    // phrase 0 is shown initially in createSpiralText
     const currentIndex = Math.floor(progress);
     if (currentIndex !== lastCompletedWipe && currentIndex >= 0) {
         lastCompletedWipe = currentIndex;
-        // Clamp to phrases array bounds - stay on last phrase once reached
-        const phraseIndex = Math.min(currentIndex, phrases.length - 1);
+        // Offset by 1: card 0 passing triggers phrase 1, card 1 triggers phrase 2, etc.
+        const phraseIndex = Math.min(currentIndex + 1, phrases.length - 1);
         updateTextMeshContent(spiralTextMesh, phrases[phraseIndex]);
     }
 
