@@ -138,7 +138,7 @@ function setupPostProcessing() {
 
             bloomPass = new THREE.UnrealBloomPass(
                 new THREE.Vector2(window.innerWidth, window.innerHeight),
-                0.25, 0.35, 0.88 // Strength, Radius, Threshold tuned for subtle screen glow
+                0.4, 0.8, 0.5 // Strength, Radius, Threshold - ethereal soft glow
             );
             composer.addPass(bloomPass);
 
@@ -614,6 +614,32 @@ function completeIntro() {
 
 // --- 3D Spiral Cards (Three.js) ---
 
+// Create radial gradient glow texture for sprite
+function createGlowTexture(color) {
+    const canvas = document.createElement('canvas');
+    canvas.width = 128;
+    canvas.height = 128;
+    const ctx = canvas.getContext('2d');
+
+    // Parse color to RGB
+    const tempColor = new THREE.Color(color);
+    const r = Math.floor(tempColor.r * 255);
+    const g = Math.floor(tempColor.g * 255);
+    const b = Math.floor(tempColor.b * 255);
+
+    // Radial gradient from center outward - strong glow
+    const gradient = ctx.createRadialGradient(64, 64, 0, 64, 64, 64);
+    gradient.addColorStop(0, `rgba(${r}, ${g}, ${b}, 1.0)`);
+    gradient.addColorStop(0.4, `rgba(${r}, ${g}, ${b}, 0.6)`);
+    gradient.addColorStop(0.7, `rgba(${r}, ${g}, ${b}, 0.25)`);
+    gradient.addColorStop(1, `rgba(${r}, ${g}, ${b}, 0)`);
+
+    ctx.fillStyle = gradient;
+    ctx.fillRect(0, 0, 128, 128);
+
+    return new THREE.CanvasTexture(canvas);
+}
+
 function create3DCard(data, index) {
     const group = new THREE.Group();
 
@@ -676,6 +702,20 @@ function create3DCard(data, index) {
     const cardLight = new THREE.PointLight(cardColor, 10, 30, 2);
     cardLight.position.set(0, 0, 0);
     group.add(cardLight);
+
+    // === GLOW SPRITE - radiates soft aura into empty space ===
+    const glowTexture = createGlowTexture(cardColor);
+    const glowMaterial = new THREE.SpriteMaterial({
+        map: glowTexture,
+        transparent: true,
+        opacity: 1.0,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false
+    });
+    const glowSprite = new THREE.Sprite(glowMaterial);
+    glowSprite.scale.set(width * 2.5, height * 2.5, 1); // Larger than card for aura
+    glowSprite.position.set(0, 0, -1); // Slightly behind card
+    group.add(glowSprite);
 
     // === TITLE TEXT at bottom (front only) ===
     if (loadedFont) {
