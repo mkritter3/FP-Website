@@ -37,6 +37,11 @@ let loadedFont = null;   // Cached font for card text
 let floorMesh = null;    // Global for hiding in spiral mode
 let wallMesh = null;     // Global for hiding in spiral mode
 
+// Raycaster for hover interaction
+const raycaster = new THREE.Raycaster();
+const mouseVec = new THREE.Vector2();
+let hoveredCard = null;  // Currently hovered card
+
 // Static Shader Uniforms
 const staticUniforms = {
     time: { value: 0 },
@@ -627,11 +632,18 @@ function createGlowTexture(color) {
     const g = Math.floor(tempColor.g * 255);
     const b = Math.floor(tempColor.b * 255);
 
-    // Radial gradient from center outward - strong glow
+    // Reduce center intensity for bright colors (prevents hotspot through glass)
+    const luminance = 0.299 * tempColor.r + 0.587 * tempColor.g + 0.114 * tempColor.b;
+    const maxChannel = Math.max(tempColor.r, tempColor.g, tempColor.b);
+    const brightness = 0.5 * luminance + 0.5 * maxChannel;
+    // Bright colors get lower center opacity (0.5 for bright, 1.0 for dark)
+    const centerOpacity = Math.max(0.5, 1.0 - brightness * 0.6);
+
+    // Radial gradient from center outward - adaptive glow
     const gradient = ctx.createRadialGradient(64, 64, 0, 64, 64, 64);
-    gradient.addColorStop(0, `rgba(${r}, ${g}, ${b}, 1.0)`);
-    gradient.addColorStop(0.4, `rgba(${r}, ${g}, ${b}, 0.6)`);
-    gradient.addColorStop(0.7, `rgba(${r}, ${g}, ${b}, 0.25)`);
+    gradient.addColorStop(0, `rgba(${r}, ${g}, ${b}, ${centerOpacity})`);
+    gradient.addColorStop(0.4, `rgba(${r}, ${g}, ${b}, ${centerOpacity * 0.6})`);
+    gradient.addColorStop(0.7, `rgba(${r}, ${g}, ${b}, ${centerOpacity * 0.25})`);
     gradient.addColorStop(1, `rgba(${r}, ${g}, ${b}, 0)`);
 
     ctx.fillStyle = gradient;
@@ -650,18 +662,22 @@ function create3DCard(data, index) {
 
     const cardColor = new THREE.Color(data.color);
 
-    // === LAYER 0: COLORED MAIN BODY (full card in card's color) ===
+    // === LAYER 0: COLORED MAIN BODY (liquid glass aesthetic) ===
     const bodyGeometry = new THREE.RoundedBoxGeometry(width, height, depth, 8, 0.8);
-    // Use high emissive for uniform glow (emissive doesn't depend on light direction)
-    const bodyMaterial = new THREE.MeshStandardMaterial({
-        color: 0x000000,           // No base color (won't respond to lights)
-        emissive: cardColor,       // Emissive IS uniform in all directions
-        emissiveIntensity: 1.0,    // Balanced glow
+    // Liquid glass effect with transmission for see-through translucency
+    const bodyMaterial = new THREE.MeshPhysicalMaterial({
+        color: cardColor,          // Tint the glass
+        transmission: 0.7,         // Glass-like see-through
+        thickness: 0.5,            // Refraction depth
+        roughness: 0.15,           // Mostly clear glass
+        ior: 1.5,                  // Index of refraction (standard glass)
+        emissive: cardColor,       // Keep colored glow
+        emissiveIntensity: 0.4,    // Reduced since transmission adds color
         transparent: true,
-        opacity: 0.85,
         side: THREE.DoubleSide
     });
     const bodyMesh = new THREE.Mesh(bodyGeometry, bodyMaterial);
+    bodyMesh.userData.isCardBody = true;  // Tag for raycasting detection
     group.add(bodyMesh);
 
     // === LAYER 1: GRAY SHELL wrapping entire card ===
@@ -698,8 +714,18 @@ function create3DCard(data, index) {
     // backTitleBar.rotation.y = Math.PI;
     // group.add(backTitleBar);
 
-    // === POINT LIGHT centered inside card (soft omnidirectional glow) ===
-    const cardLight = new THREE.PointLight(cardColor, 10, 30, 2);
+    // === POINT LIGHT with adaptive intensity ===
+    // Luminance + maxChannel + aggressive penalties for green/yellow
+    const luminance = 0.299 * cardColor.r + 0.587 * cardColor.g + 0.114 * cardColor.b;
+    const maxChannel = Math.max(cardColor.r, cardColor.g, cardColor.b);
+    const blendedFactor = 0.5 * luminance + 0.5 * maxChannel;
+    // Aggressive penalties for bright colors, especially green and yellow
+    const brightChannels = (cardColor.r > 0.7 ? 1 : 0) + (cardColor.g > 0.7 ? 1 : 0) + (cardColor.b > 0.7 ? 1 : 0);
+    const greenPenalty = cardColor.g > 0.6 ? Math.pow(cardColor.g, 2) * 3 : 0;  // Exponential green penalty
+    const yellowPenalty = (cardColor.r > 0.7 && cardColor.g > 0.7) ? 2 : 0;  // Extra for yellow (R+G)
+    const multiChannelPenalty = brightChannels * 0.5 + greenPenalty + yellowPenalty;
+    const adaptiveIntensity = Math.max(0.5, 10 * (1 - blendedFactor * 0.75) - multiChannelPenalty);
+    const cardLight = new THREE.PointLight(cardColor, adaptiveIntensity, 30, 2);
     cardLight.position.set(0, 0, 0);
     group.add(cardLight);
 
@@ -715,7 +741,12 @@ function create3DCard(data, index) {
     const glowSprite = new THREE.Sprite(glowMaterial);
     glowSprite.scale.set(width * 2.5, height * 2.5, 1); // Larger than card for aura
     glowSprite.position.set(0, 0, -1); // Slightly behind card
+    glowSprite.userData.baseScale = { x: width * 2.5, y: height * 2.5 }; // Store for hover
     group.add(glowSprite);
+
+    // Store glow sprite reference for hover effects
+    group.userData.glowSprite = glowSprite;
+    group.userData.glowMaterial = glowMaterial;
 
     // === TITLE TEXT at bottom (front only) ===
     if (loadedFont) {
@@ -781,7 +812,9 @@ function updateCard3DPositions(progress) {
         const z = Math.cos(angle) * towerRadius - towerRadius;
         const y = -offset * verticalSpacing;  // Negative so cards come from below
 
-        card.position.set(x, y, z);
+        // Apply hover float offset if card is hovered
+        const floatOffset = card.userData.hoverFloatOffset || 0;
+        card.position.set(x, y + floatOffset, z);
         card.rotation.y = angle;
         card.rotation.x = offset * -0.035;  // Subtle tilt
 
@@ -1122,6 +1155,142 @@ function triggerReverseTransition() {
     }, 80);
 }
 
+// --- Card Hover Interaction ---
+
+function updateCardHover() {
+    // Update raycaster with current mouse position
+    mouseVec.set(mouseX, mouseY);
+    raycaster.setFromCamera(mouseVec, camera);
+
+    // Get all card body meshes for intersection testing
+    const cardMeshes = [];
+    card3DArray.forEach(card => {
+        card.traverse(child => {
+            if (child.isMesh && child.userData.isCardBody) {
+                cardMeshes.push(child);
+            }
+        });
+    });
+
+    const intersects = raycaster.intersectObjects(cardMeshes);
+
+    // Find which card group is being hovered
+    let newHoveredCard = null;
+    if (intersects.length > 0) {
+        // Walk up to find the card group
+        let obj = intersects[0].object;
+        while (obj.parent && !card3DArray.includes(obj)) {
+            obj = obj.parent;
+        }
+        if (card3DArray.includes(obj)) {
+            newHoveredCard = obj;
+        }
+    }
+
+    // Handle hover state changes
+    if (newHoveredCard !== hoveredCard) {
+        // Un-hover previous card
+        if (hoveredCard) {
+            applyHoverEffect(hoveredCard, false);
+        }
+        // Hover new card
+        if (newHoveredCard) {
+            applyHoverEffect(newHoveredCard, true);
+        }
+        hoveredCard = newHoveredCard;
+
+        // Update cursor
+        document.body.style.cursor = hoveredCard ? 'pointer' : 'default';
+    }
+
+    // Apply gentle float to hovered card
+    if (hoveredCard && hoveredCard.userData.isHovered) {
+        applyHoverFloat(hoveredCard);
+    }
+}
+
+function applyHoverFloat(card) {
+    const anim = card.userData.hoverAnim;
+    if (!anim) return;
+
+    // Initialize float phase if needed
+    if (anim.floatPhase === undefined) {
+        anim.floatPhase = Math.random() * Math.PI * 2;
+    }
+
+    // Very slow, gentle floating bob - applied as OFFSET to current position
+    const time = clock.getElapsedTime();
+    const floatY = Math.sin(time * 0.3 + anim.floatPhase) * 0.08;  // Slow and subtle
+
+    // Store offset for use by updateCard3DPositions
+    card.userData.hoverFloatOffset = floatY;
+}
+
+function applyHoverEffect(card, isHovered) {
+    // Subtle, dreamy hover effects
+    const targetScale = isHovered ? 1.05 : 1.0;        // Very subtle scale
+    const targetGlowScale = isHovered ? 1.15 : 1.0;    // Gentle glow expansion
+    const targetEmissiveBoost = isHovered ? 1.2 : 1.0; // Soft brightness increase
+
+    // Use a simple lerp animation via userData
+    if (!card.userData.hoverAnim) {
+        card.userData.hoverAnim = {
+            scale: card.scale.x,
+            glowScale: 1.0,
+            emissiveBoost: 1.0
+        };
+    }
+
+    // Store hover state for reactive motion
+    card.userData.isHovered = isHovered;
+
+    // Start animation
+    animateHover(card, targetScale, targetGlowScale, targetEmissiveBoost);
+}
+
+function animateHover(card, targetScale, targetGlowScale, targetEmissiveBoost) {
+    const anim = card.userData.hoverAnim;
+    const lerpFactor = 0.04;  // Slow, dreamy transitions
+    const isUnhovering = targetScale < 1.02;
+
+    function step() {
+        // Lerp card scale
+        anim.scale += (targetScale - anim.scale) * lerpFactor;
+        card.scale.setScalar(anim.scale);
+
+        // Lerp glow
+        if (card.userData.glowSprite) {
+            const baseScale = card.userData.glowSprite.userData.baseScale;
+            anim.glowScale += (targetGlowScale - anim.glowScale) * lerpFactor;
+            card.userData.glowSprite.scale.set(
+                baseScale.x * anim.glowScale,
+                baseScale.y * anim.glowScale,
+                1
+            );
+        }
+
+        // Lerp emissive intensity
+        if (card.userData.bodyMaterial) {
+            anim.emissiveBoost += (targetEmissiveBoost - anim.emissiveBoost) * lerpFactor;
+            card.userData.bodyMaterial.emissiveIntensity = anim.emissiveBoost;
+        }
+
+        // Clear float offset when un-hovering
+        if (isUnhovering && card.userData.hoverFloatOffset) {
+            card.userData.hoverFloatOffset *= (1 - lerpFactor);  // Fade out smoothly
+            if (Math.abs(card.userData.hoverFloatOffset) < 0.001) {
+                card.userData.hoverFloatOffset = 0;
+            }
+        }
+
+        // Continue animation if not close enough
+        if (Math.abs(anim.scale - targetScale) > 0.001) {
+            requestAnimationFrame(step);
+        }
+    }
+    step();
+}
+
 // --- Animation Loop ---
 
 function animate() {
@@ -1137,6 +1306,16 @@ function animate() {
 
     smokeUniforms.uTime.value = time;
     smokeUniforms.uMouse.value.set(mouseX, mouseY);
+
+    // Card hover detection DISABLED for now
+    // if (inSpiral3D && card3DArray.length > 0) {
+    //     updateCardHover();
+    // }
+
+    // Update card positions every frame (for scroll-based positioning)
+    if (inSpiral3D && card3DArray.length > 0) {
+        updateCard3DPositions(focusProgress);
+    }
 
     // Render the scene
     if (composer) {
