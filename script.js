@@ -61,14 +61,14 @@ let lightSourceMesh = null;
 let godRaysMaterial = null;
 let beamSpotlight = null;  // Global for projector flicker animation
 
-// God rays parameters (tunable)
+// God rays parameters (tunable) - Balanced for dramatic streaks
 const godRaysParams = {
-    exposure: 0.25,
-    decay: 0.96,
-    density: 0.8,
-    weight: 0.6,
-    samples: 80,
-    lightColor: new THREE.Color(0xffcc88)
+    exposure: 1.8,       // Bright but not blown out
+    decay: 0.95,         // Balanced decay for visible rays
+    density: 2.0,        // Good reach across screen
+    weight: 0.9,         // Strong contribution per sample
+    samples: 100,        // Smooth rays
+    lightColor: new THREE.Color(0xffffff)  // Pure white source
 };
 
 // Reusable black material for occlusion pass (created once, not every frame)
@@ -142,6 +142,27 @@ const GodRaysShader = {
             return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);
         }
 
+        // Simple noise for ray streaks
+        float hash(float n) {
+            return fract(sin(n) * 43758.5453);
+        }
+
+        // Angular noise to create distinct ray streaks
+        float rayNoise(float angle) {
+            float rayCount = 24.0;  // Number of distinct rays
+            float rayAngle = angle * rayCount;
+            float rayIndex = floor(rayAngle);
+            float rayFract = fract(rayAngle);
+
+            // Smooth interpolation between rays
+            float n1 = hash(rayIndex);
+            float n2 = hash(rayIndex + 1.0);
+            float noise = mix(n1, n2, smoothstep(0.0, 1.0, rayFract));
+
+            // Create distinct ray pattern (some rays brighter, some dimmer)
+            return 0.5 + noise * 0.5;
+        }
+
         void main() {
             // Scene color
             vec4 sceneColor = texture2D(tDiffuse, vUv);
@@ -153,13 +174,18 @@ const GodRaysShader = {
                 return;
             }
 
-            // Calculate angle from light for prismatic color
+            // Calculate angle and distance from light
             vec2 toPixel = vUv - lightPositionOnScreen;
             float angle = atan(toPixel.y, toPixel.x);
+            float dist = length(toPixel);
+
             // Convert angle (-PI to PI) to hue (0 to 1)
             float hue = (angle + 3.14159) / 6.28318;
             // Create vivid rainbow color with maximum saturation
             vec3 rainbowColor = hsv2rgb(vec3(hue, 1.0, 1.0));
+
+            // Apply ray noise for distinct streaks
+            float rayStreak = rayNoise(angle / 6.28318 + 0.5);
 
             // Calculate vector from pixel to light
             vec2 deltaTexCoord = toPixel;
@@ -172,7 +198,7 @@ const GodRaysShader = {
             float godRaysIntensity = 0.0;
             float illuminationDecay = 1.0;
 
-            for(int i = 0; i < 100; i++) {
+            for(int i = 0; i < 150; i++) {
                 if(i >= samples) break;
 
                 // Step toward light
@@ -192,8 +218,12 @@ const GodRaysShader = {
                 illuminationDecay *= decay;
             }
 
-            // Apply exposure
-            godRaysIntensity *= exposure;
+            // Apply exposure and ray streak modulation
+            godRaysIntensity *= exposure * rayStreak;
+
+            // Soft falloff at edges (avoid harsh cutoff)
+            float edgeFalloff = 1.0 - smoothstep(0.4, 0.7, dist);
+            godRaysIntensity *= mix(0.3, 1.0, edgeFalloff);
 
             // Create prismatic god rays color
             vec3 prismaticRays = rainbowColor * godRaysIntensity;
@@ -348,9 +378,9 @@ function setupGodRays() {
     // Create soft particle texture for fog motes
     fogParticleTexture = createSoftParticleTexture();
 
-    // Create light source mesh - bright glowing sphere at top of spiral
-    // Larger light source for more dramatic god rays
-    const lightGeom = new THREE.SphereGeometry(18, 32, 32);
+    // Create light source mesh - Large bright sphere for dramatic god rays
+    // Large radius to create radial streaks across the screen
+    const lightGeom = new THREE.SphereGeometry(300, 64, 64);  // Balanced size
     const lightMat = new THREE.MeshBasicMaterial({
         color: 0xffffff,  // Pure white for maximum brightness in occlusion pass
         transparent: false
@@ -916,20 +946,20 @@ function triggerBlackFrameTransition() {
         if (godRaysPass) godRaysPass.enabled = true;
         if (lightSourceMesh) lightSourceMesh.visible = true;
 
-        // Update god rays parameters for dramatic prismatic beams
+        // Update god rays parameters for dramatic streaks like reference images
         if (godRaysMaterial) {
-            godRaysMaterial.uniforms.exposure.value = 0.85;   // Much stronger rays
-            godRaysMaterial.uniforms.decay.value = 0.96;      // Rays extend further
-            godRaysMaterial.uniforms.density.value = 0.8;     // Slightly less dense for distinct beams
-            godRaysMaterial.uniforms.weight.value = 0.9;      // Stronger per-sample weight
-            godRaysMaterial.uniforms.samples.value = 150;     // More samples for smoother rays
+            godRaysMaterial.uniforms.exposure.value = 1.8;    // Bright but not blown out
+            godRaysMaterial.uniforms.decay.value = 0.95;      // Balanced decay
+            godRaysMaterial.uniforms.density.value = 2.0;     // Good reach across screen
+            godRaysMaterial.uniforms.weight.value = 0.9;      // Strong contribution
+            godRaysMaterial.uniforms.samples.value = 100;     // Smooth rays
         }
 
-        // Strong bloom for dramatic backlit glow
+        // Strong bloom for dramatic backlit glow - like reference images
         if (bloomPass) {
-            bloomPass.strength = 0.7;   // Strong backlit glow
-            bloomPass.radius = 0.6;     // Wider bloom spread
-            bloomPass.threshold = 0.7;  // Lower threshold to catch more light
+            bloomPass.strength = 1.0;   // Very strong backlit glow (was 0.7)
+            bloomPass.radius = 0.8;     // Wider bloom spread (was 0.6)
+            bloomPass.threshold = 0.5;  // Much lower threshold to catch more light (was 0.7)
         }
 
         // Increase fog for visible light beam scattering
@@ -1139,23 +1169,23 @@ function initSpiral3D() {
     spiralGroup.add(dustParticles2);
 
     // === VISIBLE LIGHT SOURCE GLOW (BEHIND CARDS) ===
-    // Glowing orb at the backlight position for visual anchor
-    const glowGeom = new THREE.SphereGeometry(8, 16, 16);
+    // Intense core glow at the backlight position
+    const glowGeom = new THREE.SphereGeometry(25, 32, 32);  // Was 8, now 25
     const glowMat = new THREE.MeshBasicMaterial({
         color: 0xffffff,
         transparent: true,
-        opacity: 0.9
+        opacity: 1.0  // Full brightness core
     });
     const lightGlow = new THREE.Mesh(glowGeom, glowMat);
     lightGlow.position.set(0, 0, backLightZ - spiralCenterZ);  // Behind cards
     spiralGroup.add(lightGlow);
 
-    // Soft halo around light source
-    const haloGeom = new THREE.SphereGeometry(25, 16, 16);
+    // Large soft halo around light source - this creates the "glow" feeling
+    const haloGeom = new THREE.SphereGeometry(120, 32, 32);  // Was 25, now 120
     const haloMat = new THREE.MeshBasicMaterial({
         color: 0xffeedd,
         transparent: true,
-        opacity: 0.3,
+        opacity: 0.15,  // Subtle but noticeable
         side: THREE.BackSide
     });
     const lightHalo = new THREE.Mesh(haloGeom, haloMat);
@@ -1166,15 +1196,15 @@ function initSpiral3D() {
     // Cone pointing from behind toward camera (along Z-axis)
     // Small radius at back (light source), expands toward camera
     const beamGeom = new THREE.CylinderGeometry(
-        beamConeRadius * 1.2,  // Wide end (toward camera)
-        3,                      // Narrow end (at light source)
+        beamConeRadius * 1.5,  // Wide end (toward camera) - bigger spread
+        8,                      // Narrow end (at light source) - slightly wider
         beamLength,
         32, 1, true
     );
     const beamMat = new THREE.MeshBasicMaterial({
-        color: 0xffeedd,
+        color: 0xffffff,        // Pure white for max bloom interaction
         transparent: true,
-        opacity: 0.06,
+        opacity: 0.12,          // Doubled from 0.06 for more visibility
         side: THREE.DoubleSide,
         blending: THREE.AdditiveBlending,
         depthWrite: false
@@ -1188,15 +1218,15 @@ function initSpiral3D() {
 
     // Inner core - brighter center of beam
     const innerBeamGeom = new THREE.CylinderGeometry(
-        beamConeRadius * 0.5,  // Wide end
-        1,                      // Narrow end
+        beamConeRadius * 0.6,  // Wide end - slightly larger
+        2,                      // Narrow end
         beamLength,
         32, 1, true
     );
     const innerBeamMat = new THREE.MeshBasicMaterial({
         color: 0xffffff,
         transparent: true,
-        opacity: 0.04,
+        opacity: 0.08,          // Doubled from 0.04
         side: THREE.DoubleSide,
         blending: THREE.AdditiveBlending,
         depthWrite: false
@@ -1207,7 +1237,8 @@ function initSpiral3D() {
     spiralGroup.add(innerBeamCone);
 
     // Spotlight for backlit scene lighting - positioned behind, pointing toward camera
-    beamSpotlight = new THREE.SpotLight(0xffeedd, 60, 400, Math.PI / 4, 0.7, 1.5);
+    // Higher intensity for dramatic backlighting
+    beamSpotlight = new THREE.SpotLight(0xffffff, 100, 500, Math.PI / 3.5, 0.5, 1.2);  // Was 60 intensity, now 100
     // Position behind the cards (relative to spiralGroup at z=-600)
     beamSpotlight.position.set(0, 0, backLightZ - spiralCenterZ);  // z=-300 relative
     // Point toward camera position (relative: z=20 puts target at world z=-580)
@@ -1575,7 +1606,7 @@ function animate() {
 
         // Apply to god rays exposure for visible light variation
         if (godRaysMaterial) {
-            godRaysMaterial.uniforms.exposure.value = 0.85 * flickerMultiplier;
+            godRaysMaterial.uniforms.exposure.value = 1.8 * flickerMultiplier;
         }
 
         // Subtle light source pulsing (projector lamp warmth)

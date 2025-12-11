@@ -5,7 +5,7 @@ const { chromium } = require('playwright');
     const page = await browser.newPage({ viewport: { width: 1920, height: 1080 } });
 
     // Navigate to the local server
-    await page.goto('http://localhost:8080/index.html');
+    await page.goto('http://localhost:8000/index.html');
 
     // Wait for page to load
     await page.waitForTimeout(2000);
