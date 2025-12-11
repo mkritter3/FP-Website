@@ -564,7 +564,7 @@ function triggerBlackFrameTransition() {
     canvasContainer.style.opacity = '0';
 
     setTimeout(() => {
-        // Hide HTML spiral view (not using it anymore)
+        // Hide CSS spiral view (using 3D version)
         const spiralView = document.querySelector('.spiral-view');
         if (spiralView) spiralView.style.display = 'none';
 
@@ -572,7 +572,7 @@ function triggerBlackFrameTransition() {
         spiralGroup.visible = true;
         inSpiral3D = true;
 
-        // Turn off TV lights to prevent card blow-out
+        // Turn off TV lights
         if (tvScreenGlow) tvScreenGlow.intensity = 0;
         if (tvForwardLight) tvForwardLight.intensity = 0;
 
@@ -582,8 +582,8 @@ function triggerBlackFrameTransition() {
         if (tvGroup) tvGroup.visible = false;
 
         // Reposition camera for spiral viewing
-        camera.position.set(0, -130, -580);  // Just past TV screen
-        camera.lookAt(0, -130, -600);        // Look at spiral center
+        camera.position.set(0, -130, -580);
+        camera.lookAt(0, -130, -600);
 
         // Initialize spiral positions
         focusProgress = -4;
@@ -617,57 +617,89 @@ function completeIntro() {
 function create3DCard(data, index) {
     const group = new THREE.Group();
 
-    // Card dimensions (world units) - 1.75x size
-    const width = 14;      // ~800px equivalent * 1.75
-    const height = 8.75;   // ~500px equivalent * 1.75
-    const depth = 2.0;     // Thick enough for large corner radius
+    // Card dimensions (world units) - match CSS proportions
+    const width = 14;       // ~800px equivalent
+    const height = 8.75;    // ~500px equivalent
+    const depth = 0.75;     // Thinner profile
 
-    // Rounded geometry - radius 1.0 for very rounded corners
-    const geometry = new THREE.RoundedBoxGeometry(width, height, depth, 8, 1.0);
-
-    // Tinted translucent glass
     const cardColor = new THREE.Color(data.color);
 
-    // Frosted tinted glass - NO clearcoat to avoid white Fresnel reflections
-    const glassMaterial = new THREE.MeshStandardMaterial({
-        color: cardColor,
+    // === LAYER 0: COLORED MAIN BODY (full card in card's color) ===
+    const bodyGeometry = new THREE.RoundedBoxGeometry(width, height, depth, 8, 0.8);
+    // Use high emissive for uniform glow (emissive doesn't depend on light direction)
+    const bodyMaterial = new THREE.MeshStandardMaterial({
+        color: 0x000000,           // No base color (won't respond to lights)
+        emissive: cardColor,       // Emissive IS uniform in all directions
+        emissiveIntensity: 1.0,    // Balanced glow
         transparent: true,
-        opacity: 0.5,
-        metalness: 0.0,
-        roughness: 0.4,
-        emissive: cardColor,
-        emissiveIntensity: 0.3,
+        opacity: 0.85,
         side: THREE.DoubleSide
     });
+    const bodyMesh = new THREE.Mesh(bodyGeometry, bodyMaterial);
+    group.add(bodyMesh);
 
-    const mesh = new THREE.Mesh(geometry, glassMaterial);
-    group.add(mesh);
+    // === LAYER 1: GRAY SHELL wrapping entire card ===
+    // const shellGeometry = new THREE.RoundedBoxGeometry(width + 0.1, height + 0.1, depth + 0.1, 8, 0.8);
+    // const shellMaterial = new THREE.MeshStandardMaterial({
+    //     color: 0x2a2a2f,
+    //     transparent: true,
+    //     opacity: 0.55,
+    //     metalness: 0.05,
+    //     roughness: 0.7,
+    //     side: THREE.FrontSide
+    // });
+    // const shellMesh = new THREE.Mesh(shellGeometry, shellMaterial);
+    // group.add(shellMesh);
 
-    // Add title text to card
+    // === LAYER 2: DARKER TITLE BAR - COMMENTED OUT (was causing front face darkening) ===
+    const titleBarHeight = height * 0.35;
+    // const titleBarGeometry = new THREE.PlaneGeometry(width - 0.2, titleBarHeight);
+    // const darkTitleMaterial = new THREE.MeshStandardMaterial({
+    //     color: 0x1a1a1f,
+    //     transparent: true,
+    //     opacity: 0.7,
+    //     metalness: 0.05,
+    //     roughness: 0.7,
+    //     side: THREE.FrontSide
+    // });
+    // const frontTitleBar = new THREE.Mesh(titleBarGeometry, darkTitleMaterial);
+    // frontTitleBar.position.set(0, -height / 2 + titleBarHeight / 2, depth / 2 + 0.06);
+    // group.add(frontTitleBar);
+
+    // // === LAYER 2: DARKER TITLE BAR - BACK ===
+    // const backTitleBar = new THREE.Mesh(titleBarGeometry, darkTitleMaterial.clone());
+    // backTitleBar.position.set(0, -height / 2 + titleBarHeight / 2, -depth / 2 - 0.06);
+    // backTitleBar.rotation.y = Math.PI;
+    // group.add(backTitleBar);
+
+    // === POINT LIGHT centered inside card (soft omnidirectional glow) ===
+    const cardLight = new THREE.PointLight(cardColor, 10, 30, 2);
+    cardLight.position.set(0, 0, 0);
+    group.add(cardLight);
+
+    // === TITLE TEXT at bottom (front only) ===
     if (loadedFont) {
         const textGeometry = new THREE.TextGeometry(data.title, {
             font: loadedFont,
-            size: 1.0,
-            height: 0.08,
+            size: 0.9,
+            height: 0.06,
             curveSegments: 8,
             bevelEnabled: false
         });
 
-        // Center the text
         textGeometry.computeBoundingBox();
         const textWidth = textGeometry.boundingBox.max.x - textGeometry.boundingBox.min.x;
         const centerX = -textWidth / 2;
 
-        // White self-illuminated text
         const textMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff });
         const cardText = new THREE.Mesh(textGeometry, textMaterial);
 
-        // Position at bottom of card face
-        cardText.position.set(centerX, -height / 2 + 1.2, depth / 2 + 0.1);
+        // Position centered in title bar
+        cardText.position.set(centerX, -height / 2 + titleBarHeight / 2 - 0.3, depth / 2 + 0.1);
         group.add(cardText);
     }
 
-    group.userData = { index, data, frontMaterial: glassMaterial, baseColor: cardColor.clone() };
+    group.userData = { index, data, bodyMaterial, baseColor: cardColor.clone() };
 
     return group;
 }
@@ -718,19 +750,18 @@ function updateCard3DPositions(progress) {
         const scale = Math.max(0.6, 1.0 - dist * 0.06);
         card.scale.setScalar(scale);
 
-        // Opacity and holographic shimmer via material
-        const targetOpacity = Math.max(0.3, 1 - dist * 0.15);
-        if (card.userData.frontMaterial) {
-            card.userData.frontMaterial.opacity = targetOpacity;
+        // Opacity via body material (no hue shift - keep colors consistent)
+        const targetOpacity = Math.max(0.4, 1 - dist * 0.12);
+        if (card.userData.bodyMaterial) {
+            card.userData.bodyMaterial.opacity = targetOpacity;
 
-            // Subtle holographic color shimmer based on rotation
+            // Hyper-saturated colors - no angle-based shifting
             if (card.userData.baseColor) {
-                const hueShift = Math.sin(angle * 2) * 0.08;
                 const hsl = {};
                 card.userData.baseColor.getHSL(hsl);
-                hsl.h = (hsl.h + hueShift + 1) % 1;
-                card.userData.frontMaterial.color.setHSL(hsl.h, hsl.s, hsl.l);
-                card.userData.frontMaterial.emissive.setHSL(hsl.h, hsl.s * 0.5, hsl.l * 0.3);
+                // Boost saturation (hyper-saturate) - clamp to 1.0 max
+                const hyperSat = Math.min(1.0, hsl.s * 1.5);
+                card.userData.bodyMaterial.emissive.setHSL(hsl.h, hyperSat, hsl.l);
             }
         }
     });
