@@ -36,6 +36,10 @@ let inSpiral3D = false;  // Track if we're in 3D spiral mode
 let loadedFont = null;   // Cached font for card text
 let floorMesh = null;    // Global for hiding in spiral mode
 let wallMesh = null;     // Global for hiding in spiral mode
+let spiralTextMesh = null;     // Current text at spiral center
+let spiralTextMeshNext = null; // Next text (for wipe transition)
+let wipeClipPlane = null;      // Clipping plane for text wipe
+let wipeClipPlaneInverse = null; // Inverse clipping plane
 
 // Raycaster for hover interaction
 const raycaster = new THREE.Raycaster();
@@ -91,6 +95,7 @@ function init() {
         renderer.shadowMap.enabled = true;
         renderer.shadowMap.type = THREE.PCFSoftShadowMap;
         renderer.toneMapping = THREE.ACESFilmicToneMapping; // Cinematic tone mapping
+        renderer.localClippingEnabled = true; // Enable clipping planes for text wipe
         renderer.toneMappingExposure = 0.8; // Balanced exposure
         container.appendChild(renderer.domElement);
 
@@ -577,6 +582,11 @@ function triggerBlackFrameTransition() {
         spiralGroup.visible = true;
         inSpiral3D = true;
 
+        // Show spiral center text (both for wipe effect)
+        if (spiralTextMesh) spiralTextMesh.visible = true;
+        if (spiralTextMeshNext) spiralTextMeshNext.visible = true;
+        lastCompletedWipe = -1;  // Reset wipe tracking
+
         // Turn off TV lights
         if (tvScreenGlow) tvScreenGlow.intensity = 0;
         if (tvForwardLight) tvForwardLight.intensity = 0;
@@ -674,11 +684,29 @@ function create3DCard(data, index) {
         emissive: cardColor,       // Keep colored glow
         emissiveIntensity: 0.4,    // Reduced since transmission adds color
         transparent: true,
+        depthWrite: true,          // Write to depth buffer for proper occlusion
         side: THREE.DoubleSide
     });
     const bodyMesh = new THREE.Mesh(bodyGeometry, bodyMaterial);
     bodyMesh.userData.isCardBody = true;  // Tag for raycasting detection
     group.add(bodyMesh);
+
+    // === OCCLUDER - solid version of card (no transmission) for text wipe ===
+    // Matches card appearance but blocks see-through
+    const occluderGeometry = new THREE.PlaneGeometry(width - 0.3, height - 0.3);
+    const occluderMaterial = new THREE.MeshPhysicalMaterial({
+        color: cardColor,
+        emissive: cardColor,
+        emissiveIntensity: 0.4,
+        roughness: 0.15,
+        metalness: 0,
+        // NO transmission - this is the key difference
+        transparent: false,
+        side: THREE.DoubleSide
+    });
+    const occluderMesh = new THREE.Mesh(occluderGeometry, occluderMaterial);
+    occluderMesh.position.z = 0; // Center of card
+    group.add(occluderMesh);
 
     // === LAYER 1: GRAY SHELL wrapping entire card ===
     // const shellGeometry = new THREE.RoundedBoxGeometry(width + 0.1, height + 0.1, depth + 0.1, 8, 0.8);
@@ -796,6 +824,75 @@ function initSpiral3D() {
 
     // Initial positioning
     updateCard3DPositions(-4);
+
+    // Create spiral center text
+    createSpiralText();
+}
+
+// Create text at the center of the spiral helix with wipe clipping
+function createSpiralText() {
+    if (!loadedFont) return;
+
+    // Create clipping planes for wipe effect
+    // Plane clips where normal.dot(point) + constant < 0
+    // wipeClipPlane (-1,0,0): clips x > constant, shows x <= constant (current text, LEFT of wipe)
+    // wipeClipPlaneInverse (1,0,0): clips x < -constant, shows x >= -constant (next text, RIGHT of wipe)
+    wipeClipPlane = new THREE.Plane(new THREE.Vector3(-1, 0, 0), 50);  // Start showing all
+    wipeClipPlaneInverse = new THREE.Plane(new THREE.Vector3(1, 0, 0), 50);  // Start hiding all
+
+    // Current text (shown on LEFT of wipe line)
+    const textGeometry = new THREE.TextGeometry(phrases[0], {
+        font: loadedFont,
+        size: 2.5,  // Small enough to fit behind card when it passes
+        height: 0.15,
+        curveSegments: 12,
+        bevelEnabled: true,
+        bevelThickness: 0.05,
+        bevelSize: 0.03,
+        bevelSegments: 3
+    });
+    textGeometry.computeBoundingBox();
+    const centerOffset = (textGeometry.boundingBox.max.x - textGeometry.boundingBox.min.x) / 2;
+
+    const textMaterial = new THREE.MeshBasicMaterial({
+        color: 0xffffff,
+        clippingPlanes: [wipeClipPlane],
+        clipShadows: true
+    });
+    spiralTextMesh = new THREE.Mesh(textGeometry, textMaterial);
+    spiralTextMesh.position.set(-centerOffset, 0, -14);
+    spiralTextMesh.userData.centerOffset = centerOffset;  // Store for wipe calculations
+    spiralTextMesh.visible = false;
+    spiralGroup.add(spiralTextMesh);
+
+    // Next text (shown on RIGHT of wipe line)
+    const nextTextGeometry = new THREE.TextGeometry(phrases[1], {
+        font: loadedFont,
+        size: 2.5,
+        height: 0.15,
+        curveSegments: 12,
+        bevelEnabled: true,
+        bevelThickness: 0.05,
+        bevelSize: 0.03,
+        bevelSegments: 3
+    });
+    nextTextGeometry.computeBoundingBox();
+    const nextCenterOffset = (nextTextGeometry.boundingBox.max.x - nextTextGeometry.boundingBox.min.x) / 2;
+
+    const nextTextMaterial = new THREE.MeshBasicMaterial({
+        color: 0xffffff,
+        clippingPlanes: [wipeClipPlaneInverse],
+        clipShadows: true
+    });
+    spiralTextMeshNext = new THREE.Mesh(nextTextGeometry, nextTextMaterial);
+    spiralTextMeshNext.position.set(-nextCenterOffset, 0, -14);
+    spiralTextMeshNext.userData.centerOffset = nextCenterOffset;  // Store for wipe calculations
+    spiralTextMeshNext.visible = false;
+    spiralGroup.add(spiralTextMeshNext);
+
+    // Store phrase indices
+    spiralTextMesh.userData.phraseIndex = 0;
+    spiralTextMeshNext.userData.phraseIndex = 1;
 }
 
 function updateCard3DPositions(progress) {
@@ -807,9 +904,14 @@ function updateCard3DPositions(progress) {
         const offset = index - progress;
         const angle = offset * anglePerCard;
 
-        // Helical position
-        const x = Math.sin(angle) * towerRadius;
-        const z = Math.cos(angle) * towerRadius - towerRadius;
+        // Asymmetric helical position - cards come closer when facing front
+        // cos(angle) = 1 when facing camera, -1 when facing away
+        const facingFactor = (Math.cos(angle) + 1) / 2;  // 0 to 1 (1 = facing front)
+        const radiusMultiplier = 1 + facingFactor * 0.5;  // 1.0x to 1.5x when facing front
+        const dynamicRadius = towerRadius * radiusMultiplier;
+
+        const x = Math.sin(angle) * dynamicRadius;
+        const z = Math.cos(angle) * dynamicRadius - towerRadius;
         const y = -offset * verticalSpacing;  // Negative so cards come from below
 
         // Apply hover float offset if card is hovered
@@ -1020,67 +1122,90 @@ function animateCarousel() {
     // Update appropriate system based on mode
     if (inSpiral3D) {
         updateCard3DPositions(focusProgress);
-        updateCardText(focusProgress); // Check for text wipe
+        updateSpiralText(focusProgress);  // Text wipe for spiral center
     } else {
         updateCardPositions(focusProgress);
     }
     requestAnimationFrame(animateCarousel);
 }
 
-// Text Swap Logic for "Wipe" Effect
-// Swaps text exactly when a card passes the center point
-let currentTextIndex = -1;
+// Text Wipe Effect - card-synced reveal
+// As each card sweeps across, it wipes from one phrase to the next
+let currentTextIndex = 0;
+let lastCompletedWipe = -1;  // Track completed wipes for phrase cycling
+// Phrases for spiral center text - one for each "slot" between cards
+// 8 cards = 9 slots: initial + after each card passes
+// Last phrase is always "FRESH PRODUCE"
 const phrases = [
-    "FRESH PRODUCE",
-    "CINEMATIC",
-    "IMMERSIVE",
-    "STORYTELLING",
-    "DIGITAL",
-    "EXPERIENCE"
+    "STANDOUT IP",      // Initial (before Big Fix passes)
+    "BUILT TO SCALE",   // After Big Fix S2
+    "CINEMATIC",        // After Blood Hound
+    "IMMERSIVE",        // After The Signal
+    "STORYTELLING",     // After Hit Singles
+    "ORIGINAL",         // After The Boar's Nest
+    "COMPELLING",       // After Coming Soon #1
+    "VISIONARY",        // After Coming Soon #2
+    "FRESH PRODUCE"     // After Coming Soon #3 (final)
 ];
 
-function updateCardText(progress) {
-    if (!textMesh || !loadedFont) return;
+function updateSpiralText(progress) {
+    if (!spiralTextMesh || !loadedFont) return;
 
-    // Determine which "card index" is currently passing center (progress tracks card index)
-    // When progress is near an integer, that card is at center
-    // We trigger the swap when the card covers the text (approx progress = index)
+    // Simple approach: swap text when a card passes through center while in front
+    // The card's solid occluder naturally hides the text during transition
+    const textZ = -14;
 
-    const centerIndex = Math.round(progress);
+    // Find the card that's most in front (highest z)
+    let frontCardX = null;
+    let highestZ = textZ;
 
-    // Check if we have crossed a new integer threshold (card passing center)
-    if (centerIndex !== currentTextIndex) {
-        // Swap text!
-        currentTextIndex = centerIndex;
+    card3DArray.forEach((card) => {
+        const cardZ = card.position.z;
+        if (cardZ > highestZ) {
+            highestZ = cardZ;
+            frontCardX = card.position.x;
+        }
+    });
 
-        // Cycle through phrases
-        // Use absolute value to handle negative progress (scrolling up)
-        const phraseIndex = Math.abs(centerIndex) % phrases.length;
-        const newText = phrases[phraseIndex];
+    // Track when the front card crosses center (x ≈ 0) while in front of text
+    // This is when the text swap should happen - card is covering the text
+    const cardIsCovering = highestZ > textZ && Math.abs(frontCardX) < 5;
 
-        // Dispose old geometry
-        textMesh.geometry.dispose();
-
-        // Create new geometry
-        const textGeometry = new THREE.TextGeometry(newText, {
-            font: loadedFont,
-            size: 12,
-            height: 0.5,
-            curveSegments: 12,
-            bevelEnabled: true,
-            bevelThickness: 0.1,
-            bevelSize: 0.05,
-            bevelSegments: 3
-        });
-
-        // Center it
-        textGeometry.computeBoundingBox();
-        const centerOffset = (textGeometry.boundingBox.max.x - textGeometry.boundingBox.min.x) / 2;
-
-        textMesh.geometry = textGeometry;
-        // Keep same Z/Y, just update X centering
-        textMesh.position.x = -centerOffset;
+    // Update phrase based on progress (each integer = one card passed)
+    // Clamp to last phrase - no repeating
+    const currentIndex = Math.floor(progress);
+    if (currentIndex !== lastCompletedWipe && currentIndex >= 0) {
+        lastCompletedWipe = currentIndex;
+        // Clamp to phrases array bounds - stay on last phrase once reached
+        const phraseIndex = Math.min(currentIndex, phrases.length - 1);
+        updateTextMeshContent(spiralTextMesh, phrases[phraseIndex]);
     }
+
+    // Hide the second text mesh - we're not using clipping anymore
+    if (spiralTextMeshNext) {
+        spiralTextMeshNext.visible = false;
+    }
+}
+
+// Helper to update text mesh geometry
+function updateTextMeshContent(mesh, text) {
+    if (!mesh || !loadedFont) return;
+
+    mesh.geometry.dispose();
+    const textGeometry = new THREE.TextGeometry(text, {
+        font: loadedFont,
+        size: 2.5,  // Match createSpiralText size
+        height: 0.15,
+        curveSegments: 12,
+        bevelEnabled: true,
+        bevelThickness: 0.05,
+        bevelSize: 0.03,
+        bevelSegments: 3
+    });
+    textGeometry.computeBoundingBox();
+    const centerOffset = (textGeometry.boundingBox.max.x - textGeometry.boundingBox.min.x) / 2;
+    mesh.geometry = textGeometry;
+    mesh.position.x = -centerOffset;
 }
 
 function handleSpiralScroll(delta) {
@@ -1117,6 +1242,11 @@ function triggerReverseTransition() {
             spiralGroup.visible = false;
             inSpiral3D = false;
         }
+
+        // Hide spiral center text and reset wipe state
+        if (spiralTextMesh) spiralTextMesh.visible = false;
+        if (spiralTextMeshNext) spiralTextMeshNext.visible = false;
+        lastCompletedWipe = -1;  // Reset for next entry
 
         // Turn TV lights back on
         if (tvScreenGlow) tvScreenGlow.intensity = 30;
