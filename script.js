@@ -37,203 +37,6 @@ let loadedFont = null;   // Cached font for card text
 let floorMesh = null;    // Global for hiding in spiral mode
 let wallMesh = null;     // Global for hiding in spiral mode
 
-// Volumetric beam particles - multi-layer fog system
-let dustParticles = null;      // Layer 1: Large soft haze
-let dustParticles2 = null;     // Layer 2: Smaller dust motes
-const dustParticleCount = 3000;      // More haze particles for density
-const dustParticleCount2 = 1500;      // More dust mote particles
-
-// === BACKLIT PROJECTOR CONFIGURATION ===
-// Light comes from BEHIND the cards, pointing toward camera (one-point perspective)
-const backLightZ = -900;      // Light source position (far behind spiral at -600)
-const cameraZ = -580;         // Camera position
-const spiralCenterZ = -600;   // Spiral center
-const beamLength = 320;       // Distance from light to camera area
-const beamConeRadius = 25;    // Wider cone for dramatic effect
-
-// === GOD RAYS POST-PROCESS ===
-// Proper volumetric light scattering (GPU Gems 3 technique)
-let godRaysEnabled = false;
-let occlusionRenderTarget = null;
-let occlusionComposer = null;
-let godRaysPass = null;
-let lightSourceMesh = null;
-let godRaysMaterial = null;
-let beamSpotlight = null;  // Global for projector flicker animation
-
-// God rays parameters (tunable) - Balanced for dramatic streaks
-const godRaysParams = {
-    exposure: 1.8,       // Bright but not blown out
-    decay: 0.95,         // Balanced decay for visible rays
-    density: 2.0,        // Good reach across screen
-    weight: 0.9,         // Strong contribution per sample
-    samples: 100,        // Smooth rays
-    lightColor: new THREE.Color(0xffffff)  // Pure white source
-};
-
-// Reusable black material for occlusion pass (created once, not every frame)
-let occlusionBlackMaterial = null;
-
-// Soft particle texture for fog motes
-let fogParticleTexture = null;
-
-// Create procedural soft particle texture (extremely subtle dust mote)
-function createSoftParticleTexture(size = 64, softness = 0.6) {
-    const canvas = document.createElement('canvas');
-    canvas.width = size;
-    canvas.height = size;
-    const ctx = canvas.getContext('2d');
-    const center = size / 2;
-
-    // Soft Gaussian-like falloff - visible but diffuse
-    const gradient = ctx.createRadialGradient(center, center, 0, center, center, center);
-
-    // Subtle but visible - soft center fading smoothly
-    gradient.addColorStop(0, 'rgba(255, 255, 255, 0.5)');
-    gradient.addColorStop(0.1, 'rgba(255, 255, 255, 0.35)');
-    gradient.addColorStop(0.25, 'rgba(255, 255, 255, 0.15)');
-    gradient.addColorStop(0.45, 'rgba(255, 255, 255, 0.05)');
-    gradient.addColorStop(0.7, 'rgba(255, 255, 255, 0.01)');
-    gradient.addColorStop(1, 'rgba(255, 255, 255, 0)');
-
-    ctx.fillStyle = gradient;
-    ctx.fillRect(0, 0, size, size);
-
-    const texture = new THREE.CanvasTexture(canvas);
-    texture.needsUpdate = true;
-    return texture;
-}
-
-// God Rays Shader - Radial blur toward light source
-const GodRaysShader = {
-    uniforms: {
-        tDiffuse: { value: null },           // Main scene
-        tOcclusion: { value: null },         // Occlusion pass (light source + black silhouettes)
-        lightPositionOnScreen: { value: new THREE.Vector2(0.5, 0.5) },
-        exposure: { value: godRaysParams.exposure },
-        decay: { value: godRaysParams.decay },
-        density: { value: godRaysParams.density },
-        weight: { value: godRaysParams.weight },
-        samples: { value: godRaysParams.samples }
-    },
-    vertexShader: `
-        varying vec2 vUv;
-        void main() {
-            vUv = uv;
-            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-        }
-    `,
-    fragmentShader: `
-        uniform sampler2D tDiffuse;
-        uniform sampler2D tOcclusion;
-        uniform vec2 lightPositionOnScreen;
-        uniform float exposure;
-        uniform float decay;
-        uniform float density;
-        uniform float weight;
-        uniform int samples;
-
-        varying vec2 vUv;
-
-        // HSV to RGB conversion for prismatic rainbow effect
-        vec3 hsv2rgb(vec3 c) {
-            vec4 K = vec4(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
-            vec3 p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
-            return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);
-        }
-
-        // Simple noise for ray streaks
-        float hash(float n) {
-            return fract(sin(n) * 43758.5453);
-        }
-
-        // Angular noise to create distinct ray streaks
-        float rayNoise(float angle) {
-            float rayCount = 24.0;  // Number of distinct rays
-            float rayAngle = angle * rayCount;
-            float rayIndex = floor(rayAngle);
-            float rayFract = fract(rayAngle);
-
-            // Smooth interpolation between rays
-            float n1 = hash(rayIndex);
-            float n2 = hash(rayIndex + 1.0);
-            float noise = mix(n1, n2, smoothstep(0.0, 1.0, rayFract));
-
-            // Create distinct ray pattern (some rays brighter, some dimmer)
-            return 0.5 + noise * 0.5;
-        }
-
-        void main() {
-            // Scene color
-            vec4 sceneColor = texture2D(tDiffuse, vUv);
-
-            // Early out if light is off-screen
-            if (lightPositionOnScreen.x < -0.5 || lightPositionOnScreen.x > 1.5 ||
-                lightPositionOnScreen.y < -0.5 || lightPositionOnScreen.y > 1.5) {
-                gl_FragColor = sceneColor;
-                return;
-            }
-
-            // Calculate angle and distance from light
-            vec2 toPixel = vUv - lightPositionOnScreen;
-            float angle = atan(toPixel.y, toPixel.x);
-            float dist = length(toPixel);
-
-            // Convert angle (-PI to PI) to hue (0 to 1)
-            float hue = (angle + 3.14159) / 6.28318;
-            // Create vivid rainbow color with maximum saturation
-            vec3 rainbowColor = hsv2rgb(vec3(hue, 1.0, 1.0));
-
-            // Apply ray noise for distinct streaks
-            float rayStreak = rayNoise(angle / 6.28318 + 0.5);
-
-            // Calculate vector from pixel to light
-            vec2 deltaTexCoord = toPixel;
-            deltaTexCoord *= 1.0 / float(samples) * density;
-
-            // Current sample position
-            vec2 texCoord = vUv;
-
-            // Accumulate illumination
-            float godRaysIntensity = 0.0;
-            float illuminationDecay = 1.0;
-
-            for(int i = 0; i < 150; i++) {
-                if(i >= samples) break;
-
-                // Step toward light
-                texCoord -= deltaTexCoord;
-
-                // Clamp to valid texture coordinates
-                vec2 clampedCoord = clamp(texCoord, 0.0, 1.0);
-
-                // Sample occlusion texture (grayscale intensity)
-                float sampleIntensity = texture2D(tOcclusion, clampedCoord).r;
-
-                // Apply decay and weight
-                sampleIntensity *= illuminationDecay * weight;
-                godRaysIntensity += sampleIntensity;
-
-                // Exponential decay
-                illuminationDecay *= decay;
-            }
-
-            // Apply exposure and ray streak modulation
-            godRaysIntensity *= exposure * rayStreak;
-
-            // Soft falloff at edges (avoid harsh cutoff)
-            float edgeFalloff = 1.0 - smoothstep(0.4, 0.7, dist);
-            godRaysIntensity *= mix(0.3, 1.0, edgeFalloff);
-
-            // Create prismatic god rays color
-            vec3 prismaticRays = rainbowColor * godRaysIntensity;
-
-            // Additive blend with scene
-            gl_FragColor = vec4(sceneColor.rgb + prismaticRays, 1.0);
-        }
-    `
-};
-
 // Static Shader Uniforms
 const staticUniforms = {
     time: { value: 0 },
@@ -288,9 +91,6 @@ function init() {
 
         // Post-processing
         setupPostProcessing();
-
-        // God rays post-process system
-        setupGodRays();
 
         // Lighting
         createLighting();
@@ -357,166 +157,6 @@ function setupPostProcessing() {
         console.warn('Post-processing setup failed:', e);
         composer = null;
     }
-}
-
-// === GOD RAYS SETUP ===
-// Creates occlusion render target and god rays shader pass
-function setupGodRays() {
-    // Create occlusion render target (half resolution for performance)
-    const rtWidth = Math.floor(window.innerWidth / 2);
-    const rtHeight = Math.floor(window.innerHeight / 2);
-
-    occlusionRenderTarget = new THREE.WebGLRenderTarget(rtWidth, rtHeight, {
-        minFilter: THREE.LinearFilter,
-        magFilter: THREE.LinearFilter,
-        format: THREE.RGBAFormat
-    });
-
-    // Create reusable black material for occlusion pass
-    occlusionBlackMaterial = new THREE.MeshBasicMaterial({ color: 0x000000 });
-
-    // Create soft particle texture for fog motes
-    fogParticleTexture = createSoftParticleTexture();
-
-    // Create light source mesh - Large bright sphere for dramatic god rays
-    // Large radius to create radial streaks across the screen
-    const lightGeom = new THREE.SphereGeometry(300, 64, 64);  // Balanced size
-    const lightMat = new THREE.MeshBasicMaterial({
-        color: 0xffffff,  // Pure white for maximum brightness in occlusion pass
-        transparent: false
-    });
-    lightSourceMesh = new THREE.Mesh(lightGeom, lightMat);
-    // Backlit position: behind the spiral, pointing toward camera
-    // Relative to spiralGroup at (0, -130, -600), so z=-300 puts it at world z=-900
-    lightSourceMesh.position.set(0, 0, backLightZ - spiralCenterZ);
-    lightSourceMesh.visible = false; // Only visible in spiral mode
-
-    // Create god rays shader material
-    godRaysMaterial = new THREE.ShaderMaterial({
-        uniforms: THREE.UniformsUtils.clone(GodRaysShader.uniforms),
-        vertexShader: GodRaysShader.vertexShader,
-        fragmentShader: GodRaysShader.fragmentShader
-    });
-
-    // Create god rays pass and add to composer
-    if (THREE.ShaderPass && composer) {
-        godRaysPass = new THREE.ShaderPass(godRaysMaterial);
-        godRaysPass.needsSwap = true;
-        godRaysPass.enabled = false; // Disabled until spiral mode
-
-        // Insert god rays pass after RenderPass (index 0) but before BloomPass (index 1)
-        // We need to rebuild the passes array
-        const passes = composer.passes.slice(); // Copy existing passes
-        composer.passes = [];
-
-        // Re-add passes with god rays in correct position
-        passes.forEach((pass, index) => {
-            composer.addPass(pass);
-            // Add god rays after the first pass (RenderPass)
-            if (index === 0) {
-                composer.addPass(godRaysPass);
-            }
-        });
-    }
-
-    console.log('God rays system initialized');
-}
-
-// Render the occlusion pass - light source bright, everything else black
-function renderOcclusionPass() {
-    if (!occlusionRenderTarget || !lightSourceMesh || !inSpiral3D || !occlusionBlackMaterial) return;
-
-    // Store original states
-    const originalBackground = scene.background;
-    const originalFog = scene.fog;
-    const originalMaterials = new Map();
-    const originalTVVisible = tvGroup ? tvGroup.visible : false;
-
-    // Set black background for occlusion
-    scene.background = new THREE.Color(0x000000);
-    scene.fog = null;
-
-    // Hide TV during occlusion pass
-    if (tvGroup) tvGroup.visible = false;
-
-    // Make spiral group objects black (except light source and particles)
-    if (spiralGroup) {
-        spiralGroup.traverse((child) => {
-            if (child.isMesh && child !== lightSourceMesh) {
-                originalMaterials.set(child, child.material);
-                child.material = occlusionBlackMaterial;
-            }
-            // Hide particles during occlusion pass
-            if (child.isPoints) {
-                child.visible = false;
-            }
-        });
-    }
-
-    // Make light source visible and bright for occlusion
-    lightSourceMesh.visible = true;
-
-    // Store original clear color
-    const originalClearColor = renderer.getClearColor(new THREE.Color());
-    const originalClearAlpha = renderer.getClearAlpha();
-
-    // Render to occlusion target with explicit clear
-    renderer.setRenderTarget(occlusionRenderTarget);
-    renderer.setClearColor(0x000000, 1);
-    renderer.clear();
-    renderer.render(scene, camera);
-    renderer.setRenderTarget(null);
-
-    // Restore original clear color
-    renderer.setClearColor(originalClearColor, originalClearAlpha);
-
-    // Restore original materials
-    originalMaterials.forEach((material, mesh) => {
-        mesh.material = material;
-    });
-
-    // Restore particles visibility
-    if (spiralGroup) {
-        spiralGroup.traverse((child) => {
-            if (child.isPoints) {
-                child.visible = true;
-            }
-        });
-    }
-
-    // Hide light source for main scene render
-    lightSourceMesh.visible = false;
-
-    // Restore TV visibility
-    if (tvGroup) tvGroup.visible = originalTVVisible;
-
-    // Restore scene state
-    scene.background = originalBackground;
-    scene.fog = originalFog;
-
-    // Update god rays uniform with occlusion texture
-    if (godRaysMaterial) {
-        godRaysMaterial.uniforms.tOcclusion.value = occlusionRenderTarget.texture;
-    }
-}
-
-// Update light position in screen space for god rays shader
-function updateLightScreenPosition() {
-    if (!lightSourceMesh || !godRaysMaterial || !inSpiral3D) return;
-
-    // Get light world position (relative to spiral group)
-    const lightWorldPos = new THREE.Vector3();
-    lightSourceMesh.getWorldPosition(lightWorldPos);
-
-    // Project to screen space
-    const screenPos = lightWorldPos.clone().project(camera);
-
-    // Convert from NDC [-1,1] to UV [0,1]
-    const screenX = (screenPos.x + 1) / 2;
-    const screenY = (screenPos.y + 1) / 2;
-
-    // Update shader uniform
-    godRaysMaterial.uniforms.lightPositionOnScreen.value.set(screenX, screenY);
 }
 
 function createLighting() {
@@ -766,7 +406,7 @@ function create3DText() {
     const loader = new THREE.FontLoader();
 
     // Load a font and create 3D text geometry
-    loader.load('https://threejs.org/examples/fonts/helvetiker_bold.typeface.json', function(font) {
+    loader.load('https://threejs.org/examples/fonts/helvetiker_bold.typeface.json', function (font) {
         // Cache the font globally for card text
         loadedFont = font;
 
@@ -941,30 +581,6 @@ function triggerBlackFrameTransition() {
         if (wallMesh) wallMesh.visible = false;
         if (tvGroup) tvGroup.visible = false;
 
-        // ENABLE god rays for dramatic backlit projector effect
-        godRaysEnabled = true;
-        if (godRaysPass) godRaysPass.enabled = true;
-        if (lightSourceMesh) lightSourceMesh.visible = true;
-
-        // Update god rays parameters for dramatic streaks like reference images
-        if (godRaysMaterial) {
-            godRaysMaterial.uniforms.exposure.value = 1.8;    // Bright but not blown out
-            godRaysMaterial.uniforms.decay.value = 0.95;      // Balanced decay
-            godRaysMaterial.uniforms.density.value = 2.0;     // Good reach across screen
-            godRaysMaterial.uniforms.weight.value = 0.9;      // Strong contribution
-            godRaysMaterial.uniforms.samples.value = 100;     // Smooth rays
-        }
-
-        // Strong bloom for dramatic backlit glow - like reference images
-        if (bloomPass) {
-            bloomPass.strength = 1.0;   // Very strong backlit glow (was 0.7)
-            bloomPass.radius = 0.8;     // Wider bloom spread (was 0.6)
-            bloomPass.threshold = 0.5;  // Much lower threshold to catch more light (was 0.7)
-        }
-
-        // Increase fog for visible light beam scattering
-        if (scene.fog) scene.fog.density = 0.0012;
-
         // Reposition camera for spiral viewing
         camera.position.set(0, -130, -580);  // Just past TV screen
         camera.lookAt(0, -130, -600);        // Look at spiral center
@@ -1067,184 +683,6 @@ function initSpiral3D() {
     // Soft ambient glow - very dim so card colors shine through
     const ambientGlow = new THREE.AmbientLight(0x222233, 0.3);
     spiralGroup.add(ambientGlow);
-
-    // === GOD RAYS LIGHT SOURCE ===
-    // Add light source mesh to spiral group for proper positioning
-    if (lightSourceMesh) {
-        spiralGroup.add(lightSourceMesh);
-        lightSourceMesh.visible = false; // Hidden until god rays are active
-    }
-
-    // === LAYER 1: SOFT HAZE PARTICLES ===
-    // Large, very soft, barely visible - creates atmospheric base
-
-    const hazeGeom = new THREE.BufferGeometry();
-    const hazePositions = new Float32Array(dustParticleCount * 3);
-    const hazeVelocities = new Float32Array(dustParticleCount * 3);
-
-    // Backlit beam: particles distributed along Z-axis from light to camera
-    const relativeBackLightZ = backLightZ - spiralCenterZ;  // -300
-    const relativeCameraZ = cameraZ - spiralCenterZ;         // 20
-
-    for (let i = 0; i < dustParticleCount; i++) {
-        // Distribute along Z-axis (from light source toward camera)
-        const z = relativeBackLightZ + Math.random() * beamLength;
-        const depthRatio = (z - relativeBackLightZ) / beamLength;  // 0 at light, 1 at camera
-        // Cone expands as it travels toward camera
-        const radiusAtZ = (3 + beamConeRadius * depthRatio) * Math.sqrt(Math.random());
-        const angle = Math.random() * Math.PI * 2;
-
-        // Radial distribution around Z-axis
-        hazePositions[i * 3] = Math.cos(angle) * radiusAtZ;
-        hazePositions[i * 3 + 1] = Math.sin(angle) * radiusAtZ;
-        hazePositions[i * 3 + 2] = z;
-
-        // Particles drift TOWARD camera (positive Z direction) with slight XY turbulence
-        hazeVelocities[i * 3] = (Math.random() - 0.5) * 0.01;
-        hazeVelocities[i * 3 + 1] = (Math.random() - 0.5) * 0.01;
-        hazeVelocities[i * 3 + 2] = Math.random() * 0.03 + 0.02;  // Forward drift
-    }
-
-    hazeGeom.setAttribute('position', new THREE.BufferAttribute(hazePositions, 3));
-    hazeGeom.userData = { velocities: hazeVelocities };
-
-    // Haze material - large diffuse clouds
-    const hazeMat = new THREE.PointsMaterial({
-        color: 0xfff8ee,
-        size: 12.0,  // Large for overlapping haze
-        map: fogParticleTexture,
-        transparent: true,
-        opacity: 0.04,  // Very low - many overlapping create density
-        blending: THREE.AdditiveBlending,
-        depthWrite: false,
-        depthTest: false,
-        sizeAttenuation: true
-    });
-
-    dustParticles = new THREE.Points(hazeGeom, hazeMat);
-    spiralGroup.add(dustParticles);
-
-    // === LAYER 2: VISIBLE DUST MOTES ===
-    // Smaller, slightly more visible - the "specks" you see in projector beams
-
-    const dustGeom = new THREE.BufferGeometry();
-    const dustPositions = new Float32Array(dustParticleCount2 * 3);
-    const dustVelocities = new Float32Array(dustParticleCount2 * 3);
-
-    for (let i = 0; i < dustParticleCount2; i++) {
-        // Distribute along Z-axis, more concentrated in center of beam
-        const z = relativeBackLightZ + Math.random() * beamLength;
-        const depthRatio = (z - relativeBackLightZ) / beamLength;
-        // Smaller radius, more center-weighted for visible dust specks
-        const radiusAtZ = (2 + beamConeRadius * 0.5 * depthRatio) * Math.pow(Math.random(), 1.5);
-        const angle = Math.random() * Math.PI * 2;
-
-        dustPositions[i * 3] = Math.cos(angle) * radiusAtZ;
-        dustPositions[i * 3 + 1] = Math.sin(angle) * radiusAtZ;
-        dustPositions[i * 3 + 2] = z;
-
-        // Slightly faster forward drift with more turbulence
-        dustVelocities[i * 3] = (Math.random() - 0.5) * 0.02;
-        dustVelocities[i * 3 + 1] = (Math.random() - 0.5) * 0.02;
-        dustVelocities[i * 3 + 2] = Math.random() * 0.04 + 0.025;  // Forward drift
-    }
-
-    dustGeom.setAttribute('position', new THREE.BufferAttribute(dustPositions, 3));
-    dustGeom.userData = { velocities: dustVelocities };
-
-    // Dust mote material - visible floating specks
-    const dustMat = new THREE.PointsMaterial({
-        color: 0xffeedd,
-        size: 6.0,  // Medium size motes
-        map: fogParticleTexture,
-        transparent: true,
-        opacity: 0.035,  // Very subtle - overlap creates density
-        blending: THREE.AdditiveBlending,
-        depthWrite: false,
-        depthTest: false,
-        sizeAttenuation: true
-    });
-
-    dustParticles2 = new THREE.Points(dustGeom, dustMat);
-    spiralGroup.add(dustParticles2);
-
-    // === VISIBLE LIGHT SOURCE GLOW (BEHIND CARDS) ===
-    // Intense core glow at the backlight position
-    const glowGeom = new THREE.SphereGeometry(25, 32, 32);  // Was 8, now 25
-    const glowMat = new THREE.MeshBasicMaterial({
-        color: 0xffffff,
-        transparent: true,
-        opacity: 1.0  // Full brightness core
-    });
-    const lightGlow = new THREE.Mesh(glowGeom, glowMat);
-    lightGlow.position.set(0, 0, backLightZ - spiralCenterZ);  // Behind cards
-    spiralGroup.add(lightGlow);
-
-    // Large soft halo around light source - this creates the "glow" feeling
-    const haloGeom = new THREE.SphereGeometry(120, 32, 32);  // Was 25, now 120
-    const haloMat = new THREE.MeshBasicMaterial({
-        color: 0xffeedd,
-        transparent: true,
-        opacity: 0.15,  // Subtle but noticeable
-        side: THREE.BackSide
-    });
-    const lightHalo = new THREE.Mesh(haloGeom, haloMat);
-    lightHalo.position.set(0, 0, backLightZ - spiralCenterZ);  // Behind cards
-    spiralGroup.add(lightHalo);
-
-    // === VOLUMETRIC CONE (backlit projector beam) ===
-    // Cone pointing from behind toward camera (along Z-axis)
-    // Small radius at back (light source), expands toward camera
-    const beamGeom = new THREE.CylinderGeometry(
-        beamConeRadius * 1.5,  // Wide end (toward camera) - bigger spread
-        8,                      // Narrow end (at light source) - slightly wider
-        beamLength,
-        32, 1, true
-    );
-    const beamMat = new THREE.MeshBasicMaterial({
-        color: 0xffffff,        // Pure white for max bloom interaction
-        transparent: true,
-        opacity: 0.12,          // Doubled from 0.06 for more visibility
-        side: THREE.DoubleSide,
-        blending: THREE.AdditiveBlending,
-        depthWrite: false
-    });
-    const beamCone = new THREE.Mesh(beamGeom, beamMat);
-    // Rotate to point along Z-axis (from -Z toward +Z)
-    beamCone.rotation.x = Math.PI / 2;
-    // Position at midpoint between light and camera
-    beamCone.position.set(0, 0, (backLightZ - spiralCenterZ + cameraZ - spiralCenterZ) / 2);
-    spiralGroup.add(beamCone);
-
-    // Inner core - brighter center of beam
-    const innerBeamGeom = new THREE.CylinderGeometry(
-        beamConeRadius * 0.6,  // Wide end - slightly larger
-        2,                      // Narrow end
-        beamLength,
-        32, 1, true
-    );
-    const innerBeamMat = new THREE.MeshBasicMaterial({
-        color: 0xffffff,
-        transparent: true,
-        opacity: 0.08,          // Doubled from 0.04
-        side: THREE.DoubleSide,
-        blending: THREE.AdditiveBlending,
-        depthWrite: false
-    });
-    const innerBeamCone = new THREE.Mesh(innerBeamGeom, innerBeamMat);
-    innerBeamCone.rotation.x = Math.PI / 2;
-    innerBeamCone.position.set(0, 0, (backLightZ - spiralCenterZ + cameraZ - spiralCenterZ) / 2);
-    spiralGroup.add(innerBeamCone);
-
-    // Spotlight for backlit scene lighting - positioned behind, pointing toward camera
-    // Higher intensity for dramatic backlighting
-    beamSpotlight = new THREE.SpotLight(0xffffff, 100, 500, Math.PI / 3.5, 0.5, 1.2);  // Was 60 intensity, now 100
-    // Position behind the cards (relative to spiralGroup at z=-600)
-    beamSpotlight.position.set(0, 0, backLightZ - spiralCenterZ);  // z=-300 relative
-    // Point toward camera position (relative: z=20 puts target at world z=-580)
-    beamSpotlight.target.position.set(0, 0, cameraZ - spiralCenterZ);  // z=20 relative
-    spiralGroup.add(beamSpotlight);
-    spiralGroup.add(beamSpotlight.target);
 
     // Create all cards
     carouselData.forEach((data, index) => {
@@ -1478,10 +916,67 @@ function animateCarousel() {
     // Update appropriate system based on mode
     if (inSpiral3D) {
         updateCard3DPositions(focusProgress);
+        updateCardText(focusProgress); // Check for text wipe
     } else {
         updateCardPositions(focusProgress);
     }
     requestAnimationFrame(animateCarousel);
+}
+
+// Text Swap Logic for "Wipe" Effect
+// Swaps text exactly when a card passes the center point
+let currentTextIndex = -1;
+const phrases = [
+    "FRESH PRODUCE",
+    "CINEMATIC",
+    "IMMERSIVE",
+    "STORYTELLING",
+    "DIGITAL",
+    "EXPERIENCE"
+];
+
+function updateCardText(progress) {
+    if (!textMesh || !loadedFont) return;
+
+    // Determine which "card index" is currently passing center (progress tracks card index)
+    // When progress is near an integer, that card is at center
+    // We trigger the swap when the card covers the text (approx progress = index)
+
+    const centerIndex = Math.round(progress);
+
+    // Check if we have crossed a new integer threshold (card passing center)
+    if (centerIndex !== currentTextIndex) {
+        // Swap text!
+        currentTextIndex = centerIndex;
+
+        // Cycle through phrases
+        // Use absolute value to handle negative progress (scrolling up)
+        const phraseIndex = Math.abs(centerIndex) % phrases.length;
+        const newText = phrases[phraseIndex];
+
+        // Dispose old geometry
+        textMesh.geometry.dispose();
+
+        // Create new geometry
+        const textGeometry = new THREE.TextGeometry(newText, {
+            font: loadedFont,
+            size: 12,
+            height: 0.5,
+            curveSegments: 12,
+            bevelEnabled: true,
+            bevelThickness: 0.1,
+            bevelSize: 0.05,
+            bevelSegments: 3
+        });
+
+        // Center it
+        textGeometry.computeBoundingBox();
+        const centerOffset = (textGeometry.boundingBox.max.x - textGeometry.boundingBox.min.x) / 2;
+
+        textMesh.geometry = textGeometry;
+        // Keep same Z/Y, just update X centering
+        textMesh.position.x = -centerOffset;
+    }
 }
 
 function handleSpiralScroll(delta) {
@@ -1528,21 +1023,6 @@ function triggerReverseTransition() {
         if (wallMesh) wallMesh.visible = true;
         if (tvGroup) tvGroup.visible = true;
 
-        // Disable god rays
-        godRaysEnabled = false;
-        if (godRaysPass) godRaysPass.enabled = false;
-        if (lightSourceMesh) lightSourceMesh.visible = false;
-
-        // Reset bloom to TV settings
-        if (bloomPass) {
-            bloomPass.strength = 0.25;
-            bloomPass.radius = 0.35;
-            bloomPass.threshold = 0.88;
-        }
-
-        // Reset fog to normal density
-        if (scene.fog) scene.fog.density = 0.00045;
-
         // Also hide HTML spiral view if it was visible
         const spiralView = document.querySelector('.spiral-view');
         if (spiralView) {
@@ -1584,135 +1064,10 @@ function animate() {
         tvGroup.rotation.y = Math.sin(time * 0.5) * 0.05;
     }
 
-    // === PROJECTOR FLICKER ANIMATION ===
-    // Cinematic projector effect with subtle intensity variation
-    if (inSpiral3D) {
-        // Base flicker: gentle sine wave variation (projector hum)
-        const baseFlicker = 1.0 + Math.sin(time * 12) * 0.015;
-
-        // Secondary frequency for organic feel
-        const secondFlicker = 1.0 + Math.sin(time * 7.3) * 0.01;
-
-        // Occasional random micro-flicker (film gate flutter)
-        const microFlicker = 1.0 + (Math.random() - 0.5) * 0.02;
-
-        // Combine flicker components
-        const flickerMultiplier = baseFlicker * secondFlicker * microFlicker;
-
-        // Apply to beam spotlight
-        if (beamSpotlight) {
-            beamSpotlight.intensity = 30 * flickerMultiplier;
-        }
-
-        // Apply to god rays exposure for visible light variation
-        if (godRaysMaterial) {
-            godRaysMaterial.uniforms.exposure.value = 1.8 * flickerMultiplier;
-        }
-
-        // Subtle light source pulsing (projector lamp warmth)
-        if (lightSourceMesh) {
-            const pulseScale = 1.0 + Math.sin(time * 3) * 0.03;
-            lightSourceMesh.scale.setScalar(pulseScale);
-        }
-    }
-
-    // Animate fog particles in spiral mode (both layers)
-    if (inSpiral3D) {
-        // Layer 1: Soft haze (drifting toward camera along Z-axis)
-        if (dustParticles) {
-            const positions = dustParticles.geometry.attributes.position.array;
-            const velocities = dustParticles.geometry.userData.velocities;
-            const relBackZ = backLightZ - spiralCenterZ;  // -300
-            const relCamZ = cameraZ - spiralCenterZ;       // 20
-
-            for (let i = 0; i < dustParticleCount; i++) {
-                // Apply velocity (mainly forward along Z)
-                positions[i * 3] += velocities[i * 3];
-                positions[i * 3 + 1] += velocities[i * 3 + 1];
-                positions[i * 3 + 2] += velocities[i * 3 + 2];
-
-                // Gentle XY turbulence for haze
-                positions[i * 3] += Math.sin(time * 0.8 + i * 0.1) * 0.003;
-                positions[i * 3 + 1] += Math.cos(time * 0.6 + i * 0.15) * 0.003;
-
-                // Reset particle if it passes camera (Z > relCamZ)
-                const z = positions[i * 3 + 2];
-                if (z > relCamZ) {
-                    // Reset to near light source
-                    positions[i * 3 + 2] = relBackZ + Math.random() * 30;
-                    const depthRatio = 0.1;  // Near light source
-                    const radiusAtZ = (3 + beamConeRadius * depthRatio) * Math.sqrt(Math.random());
-                    const angle = Math.random() * Math.PI * 2;
-                    positions[i * 3] = Math.cos(angle) * radiusAtZ;
-                    positions[i * 3 + 1] = Math.sin(angle) * radiusAtZ;
-                }
-            }
-            dustParticles.geometry.attributes.position.needsUpdate = true;
-        }
-
-        // Layer 2: Dust motes (faster, drifting toward camera)
-        if (dustParticles2) {
-            const positions2 = dustParticles2.geometry.attributes.position.array;
-            const velocities2 = dustParticles2.geometry.userData.velocities;
-            const relBackZ = backLightZ - spiralCenterZ;
-            const relCamZ = cameraZ - spiralCenterZ;
-
-            for (let i = 0; i < dustParticleCount2; i++) {
-                // Apply velocity (mainly forward along Z)
-                positions2[i * 3] += velocities2[i * 3];
-                positions2[i * 3 + 1] += velocities2[i * 3 + 1];
-                positions2[i * 3 + 2] += velocities2[i * 3 + 2];
-
-                // More turbulent XY movement for dust motes
-                positions2[i * 3] += Math.sin(time * 2.5 + i * 0.3) * 0.005;
-                positions2[i * 3 + 1] += Math.cos(time * 2.2 + i * 0.25) * 0.005;
-
-                // Reset particle if it passes camera
-                const z = positions2[i * 3 + 2];
-                if (z > relCamZ) {
-                    positions2[i * 3 + 2] = relBackZ + Math.random() * 30;
-                    const depthRatio = 0.1;
-                    const radiusAtZ = (2 + beamConeRadius * 0.5 * depthRatio) * Math.pow(Math.random(), 1.5);
-                    const angle = Math.random() * Math.PI * 2;
-                    positions2[i * 3] = Math.cos(angle) * radiusAtZ;
-                    positions2[i * 3 + 1] = Math.sin(angle) * radiusAtZ;
-                }
-
-                // Keep within cone bounds based on Z position
-                const depthRatio = (z - relBackZ) / beamLength;
-                const maxRadius = 3 + beamConeRadius * depthRatio;
-                const currentRadius = Math.sqrt(
-                    positions2[i * 3] * positions2[i * 3] +
-                    positions2[i * 3 + 1] * positions2[i * 3 + 1]
-                );
-                if (currentRadius > maxRadius * 0.9) {
-                    const scale = maxRadius / currentRadius * 0.8;
-                    positions2[i * 3] *= scale;
-                    positions2[i * 3 + 1] *= scale;
-                }
-            }
-            dustParticles2.geometry.attributes.position.needsUpdate = true;
-        }
-    }
-
     smokeUniforms.uTime.value = time;
     smokeUniforms.uMouse.value.set(mouseX, mouseY);
 
-    // === GOD RAYS RENDERING ===
-    // Only do god rays when fully in spiral mode with all systems ready
-    const shouldRenderGodRays = inSpiral3D && godRaysEnabled &&
-                                 godRaysMaterial && occlusionRenderTarget &&
-                                 lightSourceMesh && spiralGroup && spiralGroup.visible;
-
-    if (shouldRenderGodRays) {
-        // Update light screen position for radial blur center
-        updateLightScreenPosition();
-
-        // Render occlusion pass (light source bright, rest black)
-        renderOcclusionPass();
-    }
-
-    // Render the scene (god rays pass will be applied if enabled in composer)
+    // Render the scene
     if (composer) {
         composer.render();
     } else {
@@ -1726,14 +1081,6 @@ function onWindowResize() {
     renderer.setSize(window.innerWidth, window.innerHeight);
     if (composer) composer.setSize(window.innerWidth, window.innerHeight);
     staticUniforms.resolution.value.set(window.innerWidth, window.innerHeight);
-
-    // Resize occlusion render target for god rays
-    if (occlusionRenderTarget) {
-        occlusionRenderTarget.setSize(
-            Math.floor(window.innerWidth / 2),
-            Math.floor(window.innerHeight / 2)
-        );
-    }
 }
 
 function onMouseMove(event) {
