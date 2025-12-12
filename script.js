@@ -40,6 +40,10 @@ let spiralTextMesh = null;     // Current text at spiral center
 let spiralTextMeshNext = null; // Next text (for wipe transition)
 let wipeClipPlane = null;      // Clipping plane for text wipe
 let wipeClipPlaneInverse = null; // Inverse clipping plane
+let textZAnimating = false;    // Text Z approach animation state
+let textZStart = -50;          // Starting Z offset for animation
+let textZTarget = -14;         // Final Z position (center of spiral)
+let textZProgress = 0;         // Animation progress 0-1
 
 // Raycaster for hover interaction
 const raycaster = new THREE.Raycaster();
@@ -559,7 +563,7 @@ function onScroll(event) {
     }
 }
 
-// Black frame beat before spiral
+// Seamless transition to spiral - text approaches from distance
 function triggerBlackFrameTransition() {
     transitioning = true;
     inIntro = false;
@@ -567,48 +571,48 @@ function triggerBlackFrameTransition() {
     // Store exact scrollZ for symmetrical reverse transition
     transitionScrollZ = scrollZ;
 
-    // Brief black frame, then show 3D spiral
-    const canvasContainer = document.getElementById('canvas-container');
+    // Hide CSS spiral view (using 3D version)
+    const spiralView = document.querySelector('.spiral-view');
+    if (spiralView) spiralView.style.display = 'none';
 
-    // Fade to black briefly
-    canvasContainer.style.opacity = '0';
+    // Show 3D spiral group immediately
+    spiralGroup.visible = true;
+    inSpiral3D = true;
 
-    setTimeout(() => {
-        // Hide CSS spiral view (using 3D version)
-        const spiralView = document.querySelector('.spiral-view');
-        if (spiralView) spiralView.style.display = 'none';
+    // Show spiral center text and start Z animation
+    if (spiralTextMesh) {
+        spiralTextMesh.visible = true;
+        // Start text further back
+        const centerOffset = spiralTextMesh.userData.centerOffset || 8;
+        spiralTextMesh.position.set(-centerOffset, 0, textZStart);
+    }
+    if (spiralTextMeshNext) spiralTextMeshNext.visible = false;  // Hide next text initially
 
-        // Show 3D spiral group
-        spiralGroup.visible = true;
-        inSpiral3D = true;
+    // Reset text state
+    lastCompletedWipe = -1;
+    if (spiralTextMesh && loadedFont) {
+        updateTextMeshContent(spiralTextMesh, phrases[0]);
+    }
 
-        // Show spiral center text (both for wipe effect)
-        if (spiralTextMesh) spiralTextMesh.visible = true;
-        if (spiralTextMeshNext) spiralTextMeshNext.visible = true;
-        lastCompletedWipe = -1;  // Reset wipe tracking
+    // Turn off TV lights
+    if (tvScreenGlow) tvScreenGlow.intensity = 0;
+    if (tvForwardLight) tvForwardLight.intensity = 0;
 
-        // Turn off TV lights
-        if (tvScreenGlow) tvScreenGlow.intensity = 0;
-        if (tvForwardLight) tvForwardLight.intensity = 0;
+    // Hide floor and wall for "floating in void" feel
+    if (floorMesh) floorMesh.visible = false;
+    if (wallMesh) wallMesh.visible = false;
+    if (tvGroup) tvGroup.visible = false;
 
-        // Hide floor and wall for "floating in void" feel
-        if (floorMesh) floorMesh.visible = false;
-        if (wallMesh) wallMesh.visible = false;
-        if (tvGroup) tvGroup.visible = false;
+    // Reposition camera for spiral viewing
+    camera.position.set(0, -130, -580);
+    camera.lookAt(0, -130, -600);
 
-        // Reposition camera for spiral viewing
-        camera.position.set(0, -130, -580);
-        camera.lookAt(0, -130, -600);
+    // Initialize spiral positions (cards below)
+    focusProgress = -4;
+    targetFocusProgress = -4;
+    updateCard3DPositions(focusProgress);
 
-        // Initialize spiral positions
-        focusProgress = -4;
-        targetFocusProgress = -4;
-        updateCard3DPositions(focusProgress);
-
-        // Fade back in
-        canvasContainer.style.opacity = '1';
-        transitioning = false;
-    }, 80); // Brief black frame
+    transitioning = false;
 }
 
 // Initialize spiral at starting position - cards below screen, ready to emerge
@@ -1171,14 +1175,16 @@ function updateSpiralText(progress) {
     // This is when the text swap should happen - card is covering the text
     const cardIsCovering = highestZ > textZ && Math.abs(frontCardX) < 5;
 
-    // Update phrase when each card passes (at integer progress boundaries)
-    // Offset by 1: progress 0 = first card passing = phrase 1
-    // phrase 0 is shown initially in createSpiralText
+    // Update phrase based on progress - works for both forward and reverse scroll
+    // progress < 0: phrase 0 (before first card)
+    // progress 0-1: phrase 1 (after first card passes)
+    // progress 1-2: phrase 2 (after second card passes), etc.
     const currentIndex = Math.floor(progress);
-    if (currentIndex !== lastCompletedWipe && currentIndex >= 0) {
-        lastCompletedWipe = currentIndex;
-        // Offset by 1: card 0 passing triggers phrase 1, card 1 triggers phrase 2, etc.
-        const phraseIndex = Math.min(currentIndex + 1, phrases.length - 1);
+    const phraseIndex = Math.max(0, Math.min(currentIndex + 1, phrases.length - 1));
+
+    // Only update when phrase actually changes (avoids updating every frame)
+    if (phraseIndex !== lastCompletedWipe) {
+        lastCompletedWipe = phraseIndex;
         updateTextMeshContent(spiralTextMesh, phrases[phraseIndex]);
     }
 
@@ -1248,6 +1254,10 @@ function triggerReverseTransition() {
         if (spiralTextMesh) spiralTextMesh.visible = false;
         if (spiralTextMeshNext) spiralTextMeshNext.visible = false;
         lastCompletedWipe = -1;  // Reset for next entry
+        // Pre-reset text to phrase 0 for next spiral entry
+        if (spiralTextMesh && loadedFont) {
+            updateTextMeshContent(spiralTextMesh, phrases[0]);
+        }
 
         // Turn TV lights back on
         if (tvScreenGlow) tvScreenGlow.intensity = 30;
@@ -1446,6 +1456,16 @@ function animate() {
     // Update card positions every frame (for scroll-based positioning)
     if (inSpiral3D && card3DArray.length > 0) {
         updateCard3DPositions(focusProgress);
+    }
+
+    // Text Z position tied to scroll progress
+    // From focusProgress -4 to 0, text moves from textZStart (-50) to textZTarget (-14)
+    if (inSpiral3D && spiralTextMesh) {
+        // Map progress -4 to 0 → Z start to target
+        const zProgress = Math.max(0, Math.min(1, (focusProgress + 4) / 4));
+        const currentZ = textZStart + (textZTarget - textZStart) * zProgress;
+        const centerOffset = spiralTextMesh.userData.centerOffset || 8;
+        spiralTextMesh.position.setZ(currentZ);
     }
 
     // Render the scene
