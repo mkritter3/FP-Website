@@ -857,57 +857,10 @@ function create3DCard(data, index) {
         videoBack.renderOrder = 1;
         group.add(videoBack);
 
-        // === SPHERICAL GLOW for video card ===
+        // Color for point light
         const glowColor = new THREE.Color(data.color || '#3A7BFF');
 
-        // Simple soft glow shader - no holes, just smooth emanation
-        const glowSphereMaterial = new THREE.ShaderMaterial({
-            uniforms: {
-                glowColor: { value: glowColor.clone() },
-                intensity: { value: 0.8 }
-            },
-            vertexShader: `
-                varying vec3 vNormal;
-                varying vec3 vPositionNormal;
-                void main() {
-                    vNormal = normalize(normalMatrix * normal);
-                    vPositionNormal = normalize((modelViewMatrix * vec4(position, 1.0)).xyz);
-                    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-                }
-            `,
-            fragmentShader: `
-                uniform vec3 glowColor;
-                uniform float intensity;
-                varying vec3 vNormal;
-                varying vec3 vPositionNormal;
-                void main() {
-                    // Simple consistent glow - minimal view angle dependence
-                    float fresnel = abs(dot(vNormal, vPositionNormal));
-                    // High base value for consistency, small fresnel variation
-                    float glow = mix(0.5, fresnel, 0.3) * intensity;
-                    // Boost saturation for more colorful glow
-                    vec3 saturatedColor = glowColor * 1.5;
-                    gl_FragColor = vec4(saturatedColor * glow, glow * 0.5);
-                }
-            `,
-            side: THREE.FrontSide,
-            blending: THREE.AdditiveBlending,
-            transparent: true,
-            depthWrite: false,
-            clipping: false
-        });
-
-        // Sphere glow
-        const glowRadius = Math.max(width, height) * 1.3;
-        const glowSphereGeo = new THREE.SphereGeometry(glowRadius, 32, 32);
-        const glowSphere = new THREE.Mesh(glowSphereGeo, glowSphereMaterial);
-        glowSphere.renderOrder = -1;
-        group.add(glowSphere);
-
-        // Store for dynamic updates
-        const glowMeshes = [glowSphere];
-
-        // Point light for video card
+        // Point light for video card (no spherical glow)
         const videoLight = new THREE.PointLight(glowColor, 1.0, 25, 2);
         videoLight.position.set(0, 0, 0);
         group.add(videoLight);
@@ -923,8 +876,6 @@ function create3DCard(data, index) {
             index,
             data,
             videoElement: video,
-            glowSphereMaterial: glowSphereMaterial,  // Shader material for sphere glow
-            glowMeshes: glowMeshes,
             videoLight: videoLight,
             sampleCanvas: sampleCanvas,
             sampleCtx: sampleCtx,
@@ -1769,11 +1720,6 @@ function animate() {
 
                             // Update point light color
                             ud.videoLight.color.copy(ud.lastSampledColor);
-
-                            // Update spherical glow color via shader uniform
-                            if (ud.glowSphereMaterial && ud.glowSphereMaterial.uniforms) {
-                                ud.glowSphereMaterial.uniforms.glowColor.value.copy(ud.lastSampledColor);
-                            }
                         } catch (e) {
                             // Ignore CORS or other errors
                         }
