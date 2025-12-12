@@ -58,6 +58,11 @@ let textZStart = -50;          // Starting Z offset for animation
 let textZTarget = -14;         // Final Z position (center of spiral)
 let textZProgress = 0;         // Animation progress 0-1
 
+// Audio system
+let audioContext = null;
+let globalMuted = false;
+let audioInitialized = false;
+
 // Raycaster for hover interaction
 const raycaster = new THREE.Raycaster();
 const mouseVec = new THREE.Vector2();
@@ -147,6 +152,25 @@ function init() {
         window.addEventListener('resize', onWindowResize);
         document.addEventListener('mousemove', onMouseMove);
         window.addEventListener('wheel', onScroll, { passive: false });
+
+        // Mute button
+        const muteBtn = document.getElementById('mute-btn');
+        if (muteBtn) {
+            muteBtn.addEventListener('click', () => {
+                // Initialize audio on first click (required for autoplay policy)
+                initializeAllVideoAudio();
+                toggleMute();
+            });
+        }
+
+        // Initialize audio on any user interaction (for autoplay policy)
+        const initAudioOnInteraction = () => {
+            initializeAllVideoAudio();
+            document.removeEventListener('click', initAudioOnInteraction);
+            document.removeEventListener('keydown', initAudioOnInteraction);
+        };
+        document.addEventListener('click', initAudioOnInteraction);
+        document.addEventListener('keydown', initAudioOnInteraction);
 
         // Initialize Spiral (Hidden initially)
         initSpiral();      // Legacy HTML version (fallback)
@@ -729,6 +753,141 @@ function createGlowTexture(color) {
     return new THREE.CanvasTexture(canvas);
 }
 
+// === AUDIO SYSTEM with positional reverb ===
+function initAudioContext() {
+    if (audioContext) return audioContext;
+    audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    return audioContext;
+}
+
+// Create impulse response for reverb (synthetic hall reverb)
+function createReverbImpulse(ctx, duration = 3, decay = 2) {
+    const sampleRate = ctx.sampleRate;
+    const length = sampleRate * duration;
+    const impulse = ctx.createBuffer(2, length, sampleRate);
+
+    for (let channel = 0; channel < 2; channel++) {
+        const channelData = impulse.getChannelData(channel);
+        for (let i = 0; i < length; i++) {
+            // Exponential decay with random noise
+            channelData[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / length, decay);
+        }
+    }
+    return impulse;
+}
+
+// Set up audio for video with reverb effect
+function setupVideoAudio(video) {
+    const ctx = initAudioContext();
+
+    // Create audio source from video
+    const source = ctx.createMediaElementSource(video);
+
+    // Dry (direct) gain
+    const dryGain = ctx.createGain();
+    dryGain.gain.value = 0; // Start silent, will be adjusted by distance
+
+    // Wet (reverb) gain
+    const wetGain = ctx.createGain();
+    wetGain.gain.value = 0; // Start silent
+
+    // Create convolver for reverb
+    const convolver = ctx.createConvolver();
+    convolver.buffer = createReverbImpulse(ctx, 4, 2.5); // Long, hollow reverb
+
+    // Low-pass filter for distant "muffled" sound
+    const lowpass = ctx.createBiquadFilter();
+    lowpass.type = 'lowpass';
+    lowpass.frequency.value = 800; // Start muffled, will increase with proximity
+
+    // Master gain for mute control
+    const masterGain = ctx.createGain();
+    masterGain.gain.value = globalMuted ? 0 : 1;
+
+    // Connect: source -> lowpass -> dry -> master
+    //                           \-> convolver -> wet -> master
+    source.connect(lowpass);
+    lowpass.connect(dryGain);
+    lowpass.connect(convolver);
+    convolver.connect(wetGain);
+    dryGain.connect(masterGain);
+    wetGain.connect(masterGain);
+    masterGain.connect(ctx.destination);
+
+    return {
+        source,
+        dryGain,
+        wetGain,
+        lowpass,
+        masterGain,
+        ctx
+    };
+}
+
+// Update audio based on distance (0 = far/reverby, 1 = close/clear)
+function updateVideoAudio(audioNodes, proximity) {
+    if (!audioNodes) return;
+
+    // proximity: 0 = far away (reverby, quiet), 1 = right in front (clear, loud)
+    const { dryGain, wetGain, lowpass, masterGain } = audioNodes;
+
+    // Volume based on proximity - louder when close
+    const volume = globalMuted ? 0 : proximity;
+
+    // Dry/wet mix: far = more reverb, close = more dry
+    const dryLevel = proximity * 0.8;  // 0 -> 0.8
+    const wetLevel = (1 - proximity) * 0.6;  // 0.6 -> 0
+
+    // Smooth transitions
+    const now = audioNodes.ctx.currentTime;
+    masterGain.gain.linearRampToValueAtTime(volume, now + 0.1);
+    dryGain.gain.linearRampToValueAtTime(dryLevel, now + 0.1);
+    wetGain.gain.linearRampToValueAtTime(wetLevel, now + 0.1);
+
+    // Lowpass filter: far = muffled (800Hz), close = clear (20000Hz)
+    const freq = 800 + proximity * 19200;
+    lowpass.frequency.linearRampToValueAtTime(freq, now + 0.1);
+}
+
+// Toggle global mute
+function toggleMute() {
+    globalMuted = !globalMuted;
+    const btn = document.getElementById('mute-btn');
+    if (btn) {
+        btn.textContent = globalMuted ? '🔇' : '🔊';
+        btn.classList.toggle('muted', globalMuted);
+    }
+
+    // Update all video audio master gains
+    for (const card of card3DArray) {
+        if (card.userData.audioNodes && card.userData.audioNodes.masterGain) {
+            card.userData.audioNodes.masterGain.gain.value = globalMuted ? 0 : 1;
+        }
+    }
+}
+
+// Initialize audio for all video cards (called on first user interaction)
+function initializeAllVideoAudio() {
+    if (audioInitialized) return;
+    audioInitialized = true;
+
+    for (const card of card3DArray) {
+        const ud = card.userData;
+        if (ud.videoElement && !ud.audioInitialized) {
+            try {
+                // Unmute video (audio will go through Web Audio API)
+                ud.videoElement.muted = false;
+                // Set up Web Audio nodes
+                ud.audioNodes = setupVideoAudio(ud.videoElement);
+                ud.audioInitialized = true;
+                console.log('Audio initialized for video card', ud.index);
+            } catch (e) {
+                console.warn('Failed to initialize audio for video card:', e);
+            }
+        }
+    }
+}
+
 function create3DCard(data, index) {
     const group = new THREE.Group();
 
@@ -742,21 +901,24 @@ function create3DCard(data, index) {
     // === VIDEO-ONLY CARD: Just emissive video planes, no body/glow/light ===
     if (data.video) {
         // Create video element
+        // Note: muted=true for autoplay, but we unmute after user interaction
+        // and route audio through Web Audio API for positional effects
         const video = document.createElement('video');
         video.src = data.video;
-        video.muted = true;
+        video.muted = true;  // Required for autoplay
         video.loop = true;
         video.playsInline = true;
         video.autoplay = true;
         video.preload = 'auto';
         video.crossOrigin = 'anonymous';
-        video.setAttribute('muted', '');
         video.setAttribute('playsinline', '');
-        video.setAttribute('autoplay', '');
         video.load();
         video.play().catch((err) => {
             console.warn('Video autoplay blocked:', err);
         });
+
+        // Audio nodes will be set up on first user interaction
+        let audioNodes = null;
 
         // Create video texture
         const videoTexture = new THREE.VideoTexture(video);
@@ -879,7 +1041,9 @@ function create3DCard(data, index) {
             videoLight: videoLight,
             sampleCanvas: sampleCanvas,
             sampleCtx: sampleCtx,
-            lastSampledColor: glowColor.clone()
+            lastSampledColor: glowColor.clone(),
+            audioNodes: null,  // Will be set up on user interaction
+            audioInitialized: false
         };
 
         return group;
@@ -1723,6 +1887,21 @@ function animate() {
                         } catch (e) {
                             // Ignore CORS or other errors
                         }
+                    }
+                }
+
+                // Update positional audio based on distance from camera focus
+                if (ud.audioNodes && ud.audioInitialized) {
+                    const cardIndex = ud.index;
+                    // Only play audio if card has appeared (spiraled into view)
+                    const hasAppeared = focusProgress >= cardIndex - 1.5;
+                    if (!hasAppeared) {
+                        updateVideoAudio(ud.audioNodes, 0); // Silent until visible
+                    } else {
+                        const distanceFromFocus = Math.abs(cardIndex - focusProgress);
+                        // Fast falloff - nearly silent beyond 0.8 cards away
+                        const proximity = Math.max(0, 1 - distanceFromFocus / 0.8);
+                        updateVideoAudio(ud.audioNodes, proximity);
                     }
                 }
             }
