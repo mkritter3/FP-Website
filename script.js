@@ -166,11 +166,18 @@ function init() {
         // Initialize audio on any user interaction (for autoplay policy)
         const initAudioOnInteraction = () => {
             initializeAllVideoAudio();
+            // Remove all listeners once audio is initialized
             document.removeEventListener('click', initAudioOnInteraction);
             document.removeEventListener('keydown', initAudioOnInteraction);
+            document.removeEventListener('mousedown', initAudioOnInteraction);
+            document.removeEventListener('touchstart', initAudioOnInteraction);
+            document.removeEventListener('wheel', initAudioOnInteraction);
         };
         document.addEventListener('click', initAudioOnInteraction);
         document.addEventListener('keydown', initAudioOnInteraction);
+        document.addEventListener('mousedown', initAudioOnInteraction);
+        document.addEventListener('touchstart', initAudioOnInteraction);
+        document.addEventListener('wheel', initAudioOnInteraction, { passive: true });
 
         // Initialize Spiral (Hidden initially)
         initSpiral();      // Legacy HTML version (fallback)
