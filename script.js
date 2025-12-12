@@ -5,11 +5,24 @@
 let scene, camera, renderer, composer;
 let tvGroup, screenMesh, textMesh;
 let tvScreenGlow, tvForwardLight;  // TV lights (to turn off in spiral mode)
+let spiralKeyLight, spiralRimLight, spiralFillLight;
 let bloomPass = null;  // For adjusting bloom during transitions
+let bokehPass = null;
 let clock = new THREE.Clock();
 let mouseX = 0, mouseY = 0;
+const tmpFocusVec = new THREE.Vector3();
 const MAX_ANISOTROPY = 8;
 const ENABLE_SMOKE = false;
+// Enabling physically correct lights changes falloff/units.
+// Keep off by default to preserve tuned TV lighting.
+const USE_PHYSICALLY_CORRECT_LIGHTS = false;
+// Global post grain/scanlines look (disabled for clean photoreal plate)
+const ENABLE_FILM_PASS = false;
+// Reflection environment (HDRI) for plastics/glass/specular pop
+const ENABLE_HDR_ENV = false;
+const HDR_ENV_URL = 'https://threejs.org/examples/textures/equirectangular/studio_small_09_1k.hdr';
+// Depth of field for cinematic focus
+const ENABLE_DOF = false;
 
 // Spiral Variables
 let carouselContainer, carouselTrack;
@@ -65,7 +78,7 @@ const smokeUniforms = {
 
 // Spiral Data
 const carouselData = [
-    { title: "The Big Fix S2", color: "#FF3366", image: "assets/placeholder1.jpg" },
+    { title: "The Big Fix S2", color: "#3A7BFF", image: "assets/placeholder1.jpg", video: "assets/video/big-fix/01_AUD_TBF_30s_16x9.mp4" },
     { title: "Blood Hound", color: "#33CCFF", image: "assets/placeholder2.jpg" },
     { title: "The Signal", color: "#FFCC33", image: "assets/placeholder3.jpg" },
     { title: "Hit Singles", color: "#33FF99", image: "assets/placeholder4.jpg" },
@@ -98,10 +111,16 @@ function init() {
         renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
         renderer.shadowMap.enabled = true;
         renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        // Color management for more photoreal output
+        renderer.outputEncoding = THREE.sRGBEncoding;
+        renderer.physicallyCorrectLights = USE_PHYSICALLY_CORRECT_LIGHTS;
         renderer.toneMapping = THREE.ACESFilmicToneMapping; // Cinematic tone mapping
         renderer.localClippingEnabled = true; // Enable clipping planes for text wipe
         renderer.toneMappingExposure = 0.8; // Balanced exposure
         container.appendChild(renderer.domElement);
+
+        // HDRI environment for realistic reflections/specular
+        loadEnvironment();
 
         // Post-processing
         setupPostProcessing();
@@ -143,29 +162,73 @@ function init() {
     }
 }
 
+function loadEnvironment() {
+    if (!ENABLE_HDR_ENV || !THREE.RGBELoader) return;
+    try {
+        const pmremGenerator = new THREE.PMREMGenerator(renderer);
+        pmremGenerator.compileEquirectangularShader();
+
+        const loader = new THREE.RGBELoader();
+        loader.setDataType(THREE.UnsignedByteType);
+        loader.setCrossOrigin('anonymous');
+        loader.load(
+            HDR_ENV_URL,
+            (hdrEquirect) => {
+                const envMap = pmremGenerator.fromEquirectangular(hdrEquirect).texture;
+                scene.environment = envMap;
+                hdrEquirect.dispose();
+                pmremGenerator.dispose();
+            },
+            undefined,
+            (err) => {
+                console.warn('HDR environment failed to load:', err);
+                pmremGenerator.dispose();
+            }
+        );
+    } catch (e) {
+        console.warn('HDR environment setup failed:', e);
+    }
+}
+
 function setupPostProcessing() {
     try {
-        if (THREE.EffectComposer && THREE.RenderPass && THREE.UnrealBloomPass && THREE.FilmPass) {
-            composer = new THREE.EffectComposer(renderer);
-            const renderPass = new THREE.RenderPass(scene, camera);
-            composer.addPass(renderPass);
+        if (!(THREE.EffectComposer && THREE.RenderPass)) {
+            composer = null;
+            return;
+        }
 
+        composer = new THREE.EffectComposer(renderer);
+        const renderPass = new THREE.RenderPass(scene, camera);
+        composer.addPass(renderPass);
+
+        if (THREE.UnrealBloomPass) {
             bloomPass = new THREE.UnrealBloomPass(
                 new THREE.Vector2(window.innerWidth, window.innerHeight),
                 0.4, 0.8, 0.5 // Strength, Radius, Threshold - ethereal soft glow
             );
             composer.addPass(bloomPass);
+        }
 
-            // Film Grain for "Gritty" look
+        if (ENABLE_FILM_PASS && THREE.FilmPass) {
+            // Film Grain / Scanlines (optional)
             const filmPass = new THREE.FilmPass(
-                0.08,   // noise intensity
-                0.015,  // scanline intensity
-                648,    // scanline count
-                false   // grayscale
+                0.04,   // noise intensity (lower than before)
+                0.0,    // scanline intensity (off by default)
+                648,
+                false
             );
             composer.addPass(filmPass);
+        }
+
+        if (ENABLE_DOF && THREE.BokehPass && THREE.BokehShader) {
+            bokehPass = new THREE.BokehPass(scene, camera, {
+                focus: 20.0,
+                aperture: 0.00018,
+                maxblur: 0.006
+            });
+            composer.addPass(bokehPass);
         } else {
-            composer = null;
+            bokehPass = null;
         }
     } catch (e) {
         console.warn('Post-processing setup failed:', e);
@@ -676,41 +739,223 @@ function create3DCard(data, index) {
 
     const cardColor = new THREE.Color(data.color);
 
-    // === LAYER 0: COLORED MAIN BODY (liquid glass aesthetic) ===
+    // === VIDEO-ONLY CARD: Just emissive video planes, no body/glow/light ===
+    if (data.video) {
+        // Create video element
+        const video = document.createElement('video');
+        video.src = data.video;
+        video.muted = true;
+        video.loop = true;
+        video.playsInline = true;
+        video.autoplay = true;
+        video.preload = 'auto';
+        video.crossOrigin = 'anonymous';
+        video.setAttribute('muted', '');
+        video.setAttribute('playsinline', '');
+        video.setAttribute('autoplay', '');
+        video.load();
+        video.play().catch((err) => {
+            console.warn('Video autoplay blocked:', err);
+        });
+
+        // Create video texture
+        const videoTexture = new THREE.VideoTexture(video);
+        videoTexture.minFilter = THREE.LinearFilter;
+        videoTexture.magFilter = THREE.LinearFilter;
+        videoTexture.encoding = THREE.sRGBEncoding;
+
+        // Video plane material: emissive so video glows at full brightness
+        // clippingPlanes: [] prevents text wipe clipping from affecting video
+        const videoMaterial = new THREE.MeshStandardMaterial({
+            map: videoTexture,
+            emissiveMap: videoTexture,
+            emissive: 0xffffff,
+            emissiveIntensity: 1.0,
+            transparent: false,
+            side: THREE.FrontSide,
+            depthWrite: true,
+            clippingPlanes: []
+        });
+
+        const planeAspect = width / height;
+
+        // Crop video to cover the card plane without stretching
+        const applyVideoCrop = () => {
+            const videoAspect = video.videoWidth / video.videoHeight;
+            if (!isFinite(videoAspect) || videoAspect <= 0) return;
+
+            if (videoAspect > planeAspect) {
+                const scaleX = planeAspect / videoAspect;
+                videoTexture.repeat.set(scaleX, 1);
+                videoTexture.offset.set((1 - scaleX) / 2, 0);
+            } else {
+                const scaleY = videoAspect / planeAspect;
+                videoTexture.repeat.set(1, scaleY);
+                videoTexture.offset.set(0, (1 - scaleY) / 2);
+            }
+            videoTexture.needsUpdate = true;
+        };
+        video.addEventListener('loadedmetadata', applyVideoCrop);
+        if (video.readyState >= 1) applyVideoCrop();
+
+        // Front video plane (full card size)
+        // === 3D FRAME for video card ===
+        const frameDepth = 0.5;  // Depth of the frame
+        const frameThickness = 0.25;  // Border width
+
+        const frameMaterial = new THREE.MeshStandardMaterial({
+            color: 0x1a1a1f,  // Dark frame
+            roughness: 0.3,
+            metalness: 0.2,
+            clippingPlanes: []  // Prevent text wipe clipping from affecting frame
+        });
+
+        // Top edge
+        const topFrame = new THREE.Mesh(
+            new THREE.BoxGeometry(width + frameThickness * 2, frameThickness, frameDepth),
+            frameMaterial
+        );
+        topFrame.position.set(0, height / 2 + frameThickness / 2, 0);
+        group.add(topFrame);
+
+        // Bottom edge
+        const bottomFrame = new THREE.Mesh(
+            new THREE.BoxGeometry(width + frameThickness * 2, frameThickness, frameDepth),
+            frameMaterial
+        );
+        bottomFrame.position.set(0, -height / 2 - frameThickness / 2, 0);
+        group.add(bottomFrame);
+
+        // Left edge
+        const leftFrame = new THREE.Mesh(
+            new THREE.BoxGeometry(frameThickness, height, frameDepth),
+            frameMaterial
+        );
+        leftFrame.position.set(-width / 2 - frameThickness / 2, 0, 0);
+        group.add(leftFrame);
+
+        // Right edge
+        const rightFrame = new THREE.Mesh(
+            new THREE.BoxGeometry(frameThickness, height, frameDepth),
+            frameMaterial
+        );
+        rightFrame.position.set(width / 2 + frameThickness / 2, 0, 0);
+        group.add(rightFrame);
+
+        // Video planes positioned on front/back of frame
+        const videoGeometry = new THREE.PlaneGeometry(width, height);
+        const videoFront = new THREE.Mesh(videoGeometry, videoMaterial);
+        videoFront.position.set(0, 0, frameDepth / 2 + 0.01);
+        videoFront.renderOrder = 1;
+        group.add(videoFront);
+
+        // Back video plane (mirrored)
+        const videoBackMaterial = videoMaterial.clone();
+        const videoBack = new THREE.Mesh(videoGeometry, videoBackMaterial);
+        videoBack.position.set(0, 0, -frameDepth / 2 - 0.01);
+        videoBack.rotation.y = Math.PI;
+        videoBack.renderOrder = 1;
+        group.add(videoBack);
+
+        // === SPHERICAL GLOW for video card ===
+        const glowColor = new THREE.Color(data.color || '#3A7BFF');
+
+        // Simple soft glow shader - no holes, just smooth emanation
+        const glowSphereMaterial = new THREE.ShaderMaterial({
+            uniforms: {
+                glowColor: { value: glowColor.clone() },
+                intensity: { value: 0.8 }
+            },
+            vertexShader: `
+                varying vec3 vNormal;
+                varying vec3 vPositionNormal;
+                void main() {
+                    vNormal = normalize(normalMatrix * normal);
+                    vPositionNormal = normalize((modelViewMatrix * vec4(position, 1.0)).xyz);
+                    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+                }
+            `,
+            fragmentShader: `
+                uniform vec3 glowColor;
+                uniform float intensity;
+                varying vec3 vNormal;
+                varying vec3 vPositionNormal;
+                void main() {
+                    // Simple consistent glow - minimal view angle dependence
+                    float fresnel = abs(dot(vNormal, vPositionNormal));
+                    // High base value for consistency, small fresnel variation
+                    float glow = mix(0.5, fresnel, 0.3) * intensity;
+                    // Boost saturation for more colorful glow
+                    vec3 saturatedColor = glowColor * 1.5;
+                    gl_FragColor = vec4(saturatedColor * glow, glow * 0.5);
+                }
+            `,
+            side: THREE.FrontSide,
+            blending: THREE.AdditiveBlending,
+            transparent: true,
+            depthWrite: false,
+            clipping: false
+        });
+
+        // Sphere glow
+        const glowRadius = Math.max(width, height) * 1.3;
+        const glowSphereGeo = new THREE.SphereGeometry(glowRadius, 32, 32);
+        const glowSphere = new THREE.Mesh(glowSphereGeo, glowSphereMaterial);
+        glowSphere.renderOrder = -1;
+        group.add(glowSphere);
+
+        // Store for dynamic updates
+        const glowMeshes = [glowSphere];
+
+        // Point light for video card
+        const videoLight = new THREE.PointLight(glowColor, 1.0, 25, 2);
+        videoLight.position.set(0, 0, 0);
+        group.add(videoLight);
+
+        // Canvas for sampling video colors dynamically
+        const sampleCanvas = document.createElement('canvas');
+        sampleCanvas.width = 16;
+        sampleCanvas.height = 16;
+        const sampleCtx = sampleCanvas.getContext('2d');
+
+        // Store references for dynamic updates
+        group.userData = {
+            index,
+            data,
+            videoElement: video,
+            glowSphereMaterial: glowSphereMaterial,  // Shader material for sphere glow
+            glowMeshes: glowMeshes,
+            videoLight: videoLight,
+            sampleCanvas: sampleCanvas,
+            sampleCtx: sampleCtx,
+            lastSampledColor: glowColor.clone()
+        };
+
+        return group;
+    }
+
+    // === REGULAR CARD: Body, glow, light, title ===
     const bodyGeometry = new THREE.RoundedBoxGeometry(width, height, depth, 8, 0.8);
-    // Liquid glass effect with transmission for see-through translucency
+    const maxChan = Math.max(cardColor.r, cardColor.g, cardColor.b);
+    const adaptiveEmissive = 0.3 + 0.6 * (1 - maxChan);
     const bodyMaterial = new THREE.MeshPhysicalMaterial({
-        color: cardColor,          // Tint the glass
-        transmission: 0.7,         // Glass-like see-through
-        thickness: 0.5,            // Refraction depth
-        roughness: 0.15,           // Mostly clear glass
-        ior: 1.5,                  // Index of refraction (standard glass)
-        emissive: cardColor,       // Keep colored glow
-        emissiveIntensity: 0.4,    // Reduced since transmission adds color
-        transparent: true,
-        depthWrite: true,          // Write to depth buffer for proper occlusion
-        side: THREE.DoubleSide
+        color: cardColor,
+        roughness: 0.18,
+        metalness: 0.05,
+        clearcoat: 0.4,
+        clearcoatRoughness: 0.28,
+        envMapIntensity: 1.1,
+        emissive: cardColor,
+        emissiveIntensity: adaptiveEmissive,
+        transparent: false,
+        opacity: 1.0,
+        depthWrite: true,
+        side: THREE.FrontSide
     });
     const bodyMesh = new THREE.Mesh(bodyGeometry, bodyMaterial);
-    bodyMesh.userData.isCardBody = true;  // Tag for raycasting detection
+    bodyMesh.userData.isCardBody = true;
+    bodyMesh.renderOrder = 1;
     group.add(bodyMesh);
-
-    // === OCCLUDER - solid version of card (no transmission) for text wipe ===
-    // Matches card appearance but blocks see-through
-    const occluderGeometry = new THREE.PlaneGeometry(width - 0.3, height - 0.3);
-    const occluderMaterial = new THREE.MeshPhysicalMaterial({
-        color: cardColor,
-        emissive: cardColor,
-        emissiveIntensity: 0.4,
-        roughness: 0.15,
-        metalness: 0,
-        // NO transmission - this is the key difference
-        transparent: false,
-        side: THREE.DoubleSide
-    });
-    const occluderMesh = new THREE.Mesh(occluderGeometry, occluderMaterial);
-    occluderMesh.position.z = 0; // Center of card
-    group.add(occluderMesh);
 
     // === LAYER 1: GRAY SHELL wrapping entire card ===
     // const shellGeometry = new THREE.RoundedBoxGeometry(width + 0.1, height + 0.1, depth + 0.1, 8, 0.8);
@@ -747,37 +992,44 @@ function create3DCard(data, index) {
     // group.add(backTitleBar);
 
     // === POINT LIGHT with adaptive intensity ===
-    // Luminance + maxChannel + aggressive penalties for green/yellow
-    const luminance = 0.299 * cardColor.r + 0.587 * cardColor.g + 0.114 * cardColor.b;
+    // Dark colors get MORE light, bright colors get LESS
+    // Use max channel (not luminance) so cyan/bright colors are properly penalized
     const maxChannel = Math.max(cardColor.r, cardColor.g, cardColor.b);
-    const blendedFactor = 0.5 * luminance + 0.5 * maxChannel;
-    // Aggressive penalties for bright colors, especially green and yellow
-    const brightChannels = (cardColor.r > 0.7 ? 1 : 0) + (cardColor.g > 0.7 ? 1 : 0) + (cardColor.b > 0.7 ? 1 : 0);
-    const greenPenalty = cardColor.g > 0.6 ? Math.pow(cardColor.g, 2) * 3 : 0;  // Exponential green penalty
-    const yellowPenalty = (cardColor.r > 0.7 && cardColor.g > 0.7) ? 2 : 0;  // Extra for yellow (R+G)
-    const multiChannelPenalty = brightChannels * 0.5 + greenPenalty + yellowPenalty;
-    const adaptiveIntensity = Math.max(0.5, 10 * (1 - blendedFactor * 0.75) - multiChannelPenalty);
-    const cardLight = new THREE.PointLight(cardColor, adaptiveIntensity, 30, 2);
+    // Inverse relationship: dark (max ~0) gets high intensity, bright (max ~1) gets low
+    // Range: max 0 -> intensity 4, max 1 -> intensity 0.3
+    const adaptiveIntensity = 0.15 + 1.35 * (1 - maxChannel);
+    const cardLight = new THREE.PointLight(cardColor, adaptiveIntensity, 25, 2);
     cardLight.position.set(0, 0, 0);
     group.add(cardLight);
 
-    // === GLOW SPRITE - radiates soft aura into empty space ===
+    // === GLOW PLANES - front and back, match card exactly ===
     const glowTexture = createGlowTexture(cardColor);
-    const glowMaterial = new THREE.SpriteMaterial({
+    const glowMaterial = new THREE.MeshBasicMaterial({
         map: glowTexture,
         transparent: true,
         opacity: 1.0,
         blending: THREE.AdditiveBlending,
-        depthWrite: false
+        depthWrite: false,
+        depthTest: true
     });
-    const glowSprite = new THREE.Sprite(glowMaterial);
-    glowSprite.scale.set(width * 2.5, height * 2.5, 1); // Larger than card for aura
-    glowSprite.position.set(0, 0, -1); // Slightly behind card
-    glowSprite.userData.baseScale = { x: width * 2.5, y: height * 2.5 }; // Store for hover
-    group.add(glowSprite);
+    // Front glow - slightly in front of card
+    const glowGeometry = new THREE.PlaneGeometry(width * 2.5, height * 2.5);
+    const glowFront = new THREE.Mesh(glowGeometry, glowMaterial);
+    glowFront.position.set(0, 0, depth / 2 + 0.01);
+    glowFront.renderOrder = -1;
+    group.add(glowFront);
 
-    // Store glow sprite reference for hover effects
-    group.userData.glowSprite = glowSprite;
+    // Back glow - slightly behind card
+    const glowBack = new THREE.Mesh(glowGeometry, glowMaterial.clone());
+    glowBack.position.set(0, 0, -depth / 2 - 0.01);
+    glowBack.rotation.y = Math.PI;  // Face outward
+    glowBack.renderOrder = -1;
+    group.add(glowBack);
+
+    // Store glow reference for hover effects
+    glowFront.userData.baseScale = { x: width * 2.5, y: height * 2.5 };
+    group.userData.glowSprite = glowFront;
+    group.userData.glowBack = glowBack;
     group.userData.glowMaterial = glowMaterial;
 
     // === TITLE TEXT at bottom (front only) ===
@@ -802,7 +1054,13 @@ function create3DCard(data, index) {
         group.add(cardText);
     }
 
-    group.userData = { index, data, bodyMaterial, baseColor: cardColor.clone() };
+    group.userData = {
+        ...group.userData,
+        index,
+        data,
+        bodyMaterial,
+        baseColor: cardColor.clone()
+    };
 
     return group;
 }
@@ -815,9 +1073,22 @@ function initSpiral3D() {
     // Initially hidden
     spiralGroup.visible = false;
 
-    // Soft ambient glow - very dim so card colors shine through
-    const ambientGlow = new THREE.AmbientLight(0x222233, 0.3);
+    // Spiral light rig: soft key + cool rim + gentle fill
+    const ambientGlow = new THREE.AmbientLight(0x222233, 0.15);
     spiralGroup.add(ambientGlow);
+
+    spiralFillLight = new THREE.HemisphereLight(0x223355, 0x000000, 0.25);
+    spiralGroup.add(spiralFillLight);
+
+    spiralKeyLight = new THREE.SpotLight(0xffffff, 1.8, 200, Math.PI / 6, 0.7, 1.5);
+    spiralKeyLight.position.set(0, 10, 35);
+    spiralKeyLight.target.position.set(0, 0, 0);
+    spiralGroup.add(spiralKeyLight);
+    spiralGroup.add(spiralKeyLight.target);
+
+    spiralRimLight = new THREE.DirectionalLight(0x88aaff, 0.9);
+    spiralRimLight.position.set(-20, 8, -30);
+    spiralGroup.add(spiralRimLight);
 
     // Create all cards
     carouselData.forEach((data, index) => {
@@ -860,11 +1131,12 @@ function createSpiralText() {
 
     const textMaterial = new THREE.MeshBasicMaterial({
         color: 0xffffff,
-        clippingPlanes: [wipeClipPlane],
-        clipShadows: true
+        depthTest: true,   // Text is hidden by objects in front
+        depthWrite: true   // Text writes to depth buffer
     });
     spiralTextMesh = new THREE.Mesh(textGeometry, textMaterial);
     spiralTextMesh.position.set(-centerOffset, 0, -14);
+    spiralTextMesh.renderOrder = 0;  // Render text first
     spiralTextMesh.userData.centerOffset = centerOffset;  // Store for wipe calculations
     spiralTextMesh.visible = false;
     spiralGroup.add(spiralTextMesh);
@@ -938,7 +1210,6 @@ function updateCard3DPositions(progress) {
             if (card.userData.baseColor) {
                 const hsl = {};
                 card.userData.baseColor.getHSL(hsl);
-                // Boost saturation (hyper-saturate) - clamp to 1.0 max
                 const hyperSat = Math.min(1.0, hsl.s * 1.5);
                 card.userData.bodyMaterial.emissive.setHSL(hsl.h, hyperSat, hsl.l);
             }
@@ -1456,6 +1727,71 @@ function animate() {
     // Update card positions every frame (for scroll-based positioning)
     if (inSpiral3D && card3DArray.length > 0) {
         updateCard3DPositions(focusProgress);
+    }
+
+    // Dynamic video glow: sample video colors every ~100ms
+    if (inSpiral3D && card3DArray.length > 0) {
+        for (const card of card3DArray) {
+            const ud = card.userData;
+            if (ud.videoElement && ud.sampleCtx && ud.videoLight) {
+                const video = ud.videoElement;
+                // Only sample if video is ready and playing
+                if (video.readyState >= 2 && !video.paused) {
+                    // Throttle: check time-based (every ~100ms)
+                    const now = performance.now();
+                    if (!ud.lastSampleTime || now - ud.lastSampleTime > 100) {
+                        ud.lastSampleTime = now;
+
+                        const ctx = ud.sampleCtx;
+                        const canvas = ud.sampleCanvas;
+
+                        try {
+                            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                            const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+                            const data = imageData.data;
+
+                            // Average color from all pixels
+                            let r = 0, g = 0, b = 0, count = 0;
+                            for (let i = 0; i < data.length; i += 4) {
+                                r += data[i];
+                                g += data[i + 1];
+                                b += data[i + 2];
+                                count++;
+                            }
+                            r = (r / count) / 255;
+                            g = (g / count) / 255;
+                            b = (b / count) / 255;
+
+                            const newColor = new THREE.Color(r, g, b);
+
+                            // Lerp for smooth transitions
+                            ud.lastSampledColor.lerp(newColor, 0.15);
+
+                            // Update point light color
+                            ud.videoLight.color.copy(ud.lastSampledColor);
+
+                            // Update spherical glow color via shader uniform
+                            if (ud.glowSphereMaterial && ud.glowSphereMaterial.uniforms) {
+                                ud.glowSphereMaterial.uniforms.glowColor.value.copy(ud.lastSampledColor);
+                            }
+                        } catch (e) {
+                            // Ignore CORS or other errors
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Depth of field focus follows the nearest card
+    if (bokehPass && inSpiral3D && card3DArray.length > 0 && bokehPass.materialBokeh) {
+        const focusIndex = THREE.MathUtils.clamp(Math.round(focusProgress), 0, card3DArray.length - 1);
+        const focusCard = card3DArray[focusIndex];
+        if (focusCard) {
+            focusCard.getWorldPosition(tmpFocusVec);
+            const focusDist = camera.position.distanceTo(tmpFocusVec);
+            bokehPass.materialBokeh.uniforms.focus.value = focusDist;
+        }
     }
 
     // Text Z position tied to scroll progress
