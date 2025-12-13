@@ -887,6 +887,8 @@ function initializeAllVideoAudio() {
                 // Set up Web Audio nodes
                 ud.audioNodes = setupVideoAudio(ud.videoElement);
                 ud.audioInitialized = true;
+                // Ensure video is playing (might have paused when unmuted)
+                ud.videoElement.play().catch(() => {});
                 console.log('Audio initialized for video card', ud.index);
             } catch (e) {
                 console.warn('Failed to initialize audio for video card:', e);
