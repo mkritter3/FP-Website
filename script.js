@@ -921,10 +921,17 @@ function create3DCard(data, index) {
         video.preload = 'auto';
         video.crossOrigin = 'anonymous';
         video.setAttribute('playsinline', '');
+
+        // Ensure video plays when ready
+        const tryPlay = () => {
+            video.play().catch((err) => {
+                console.warn('Video autoplay blocked:', err);
+            });
+        };
+        video.addEventListener('canplaythrough', tryPlay, { once: true });
+        video.addEventListener('loadeddata', tryPlay, { once: true });
         video.load();
-        video.play().catch((err) => {
-            console.warn('Video autoplay blocked:', err);
-        });
+        tryPlay(); // Also try immediately
 
         // Audio nodes will be set up on first user interaction
         let audioNodes = null;
@@ -1058,7 +1065,113 @@ function create3DCard(data, index) {
         return group;
     }
 
-    // === REGULAR CARD: Body, glow, light, title ===
+    // === REGULAR CARD: Now uses framed image style like video cards ===
+    // Load image as texture
+    const textureLoader = new THREE.TextureLoader();
+    const imageTexture = textureLoader.load(data.image || 'assets/placeholder1.jpg');
+    imageTexture.encoding = THREE.sRGBEncoding;
+
+    // Image material: emissive so it glows at full brightness
+    const imageMaterial = new THREE.MeshStandardMaterial({
+        map: imageTexture,
+        emissiveMap: imageTexture,
+        emissive: 0xffffff,
+        emissiveIntensity: 1.0,
+        transparent: false,
+        side: THREE.FrontSide,
+        depthWrite: true,
+        clippingPlanes: []
+    });
+
+    // === 3D FRAME for image card (same as video card) ===
+    const frameDepth = 0.5;
+    const frameThickness = 0.25;
+
+    const frameMaterial = new THREE.MeshStandardMaterial({
+        color: 0x1a1a1f,  // Dark frame
+        roughness: 0.3,
+        metalness: 0.2,
+        clippingPlanes: []
+    });
+
+    // Top edge
+    const topFrame = new THREE.Mesh(
+        new THREE.BoxGeometry(width + frameThickness * 2, frameThickness, frameDepth),
+        frameMaterial
+    );
+    topFrame.position.set(0, height / 2 + frameThickness / 2, 0);
+    group.add(topFrame);
+
+    // Bottom edge
+    const bottomFrame = new THREE.Mesh(
+        new THREE.BoxGeometry(width + frameThickness * 2, frameThickness, frameDepth),
+        frameMaterial
+    );
+    bottomFrame.position.set(0, -height / 2 - frameThickness / 2, 0);
+    group.add(bottomFrame);
+
+    // Left edge
+    const leftFrame = new THREE.Mesh(
+        new THREE.BoxGeometry(frameThickness, height, frameDepth),
+        frameMaterial
+    );
+    leftFrame.position.set(-width / 2 - frameThickness / 2, 0, 0);
+    group.add(leftFrame);
+
+    // Right edge
+    const rightFrame = new THREE.Mesh(
+        new THREE.BoxGeometry(frameThickness, height, frameDepth),
+        frameMaterial
+    );
+    rightFrame.position.set(width / 2 + frameThickness / 2, 0, 0);
+    group.add(rightFrame);
+
+    // Image planes positioned on front/back of frame
+    const imageGeometry = new THREE.PlaneGeometry(width, height);
+    const imageFront = new THREE.Mesh(imageGeometry, imageMaterial);
+    imageFront.position.set(0, 0, frameDepth / 2 + 0.01);
+    imageFront.renderOrder = 1;
+    group.add(imageFront);
+
+    // Back image plane (same image, mirrored)
+    const imageBackMaterial = imageMaterial.clone();
+    const imageBack = new THREE.Mesh(imageGeometry, imageBackMaterial);
+    imageBack.position.set(0, 0, -frameDepth / 2 - 0.01);
+    imageBack.rotation.y = Math.PI;
+    imageBack.renderOrder = 1;
+    group.add(imageBack);
+
+    // Point light for image card
+    const glowColor = new THREE.Color(data.color || '#3A7BFF');
+    const imageLight = new THREE.PointLight(glowColor, 1.0, 25, 2);
+    imageLight.position.set(0, 0, 0);
+    group.add(imageLight);
+
+    group.userData = {
+        index,
+        data,
+        baseColor: cardColor.clone()
+    };
+
+    return group;
+}
+
+// =============================================================================
+// LEGACY GLOWING CARD - NOT CURRENTLY IN USE
+// =============================================================================
+// This is the old glowing card style with rounded box body, glow planes, and title text.
+// Keeping this for reference in case we want to bring it back.
+// To use: replace create3DCard's regular card section with this function call
+// =============================================================================
+/*
+function create3DCardLegacy_GlowingStyle(data, index) {
+    const group = new THREE.Group();
+    const width = 14;
+    const height = 8.75;
+    const depth = 0.75;
+    const cardColor = new THREE.Color(data.color);
+
+    // Rounded box body with emissive glow
     const bodyGeometry = new THREE.RoundedBoxGeometry(width, height, depth, 8, 0.8);
     const maxChan = Math.max(cardColor.r, cardColor.g, cardColor.b);
     const adaptiveEmissive = 0.3 + 0.6 * (1 - maxChan);
@@ -1081,52 +1194,14 @@ function create3DCard(data, index) {
     bodyMesh.renderOrder = 1;
     group.add(bodyMesh);
 
-    // === LAYER 1: GRAY SHELL wrapping entire card ===
-    // const shellGeometry = new THREE.RoundedBoxGeometry(width + 0.1, height + 0.1, depth + 0.1, 8, 0.8);
-    // const shellMaterial = new THREE.MeshStandardMaterial({
-    //     color: 0x2a2a2f,
-    //     transparent: true,
-    //     opacity: 0.55,
-    //     metalness: 0.05,
-    //     roughness: 0.7,
-    //     side: THREE.FrontSide
-    // });
-    // const shellMesh = new THREE.Mesh(shellGeometry, shellMaterial);
-    // group.add(shellMesh);
-
-    // === LAYER 2: DARKER TITLE BAR - COMMENTED OUT (was causing front face darkening) ===
-    const titleBarHeight = height * 0.35;
-    // const titleBarGeometry = new THREE.PlaneGeometry(width - 0.2, titleBarHeight);
-    // const darkTitleMaterial = new THREE.MeshStandardMaterial({
-    //     color: 0x1a1a1f,
-    //     transparent: true,
-    //     opacity: 0.7,
-    //     metalness: 0.05,
-    //     roughness: 0.7,
-    //     side: THREE.FrontSide
-    // });
-    // const frontTitleBar = new THREE.Mesh(titleBarGeometry, darkTitleMaterial);
-    // frontTitleBar.position.set(0, -height / 2 + titleBarHeight / 2, depth / 2 + 0.06);
-    // group.add(frontTitleBar);
-
-    // // === LAYER 2: DARKER TITLE BAR - BACK ===
-    // const backTitleBar = new THREE.Mesh(titleBarGeometry, darkTitleMaterial.clone());
-    // backTitleBar.position.set(0, -height / 2 + titleBarHeight / 2, -depth / 2 - 0.06);
-    // backTitleBar.rotation.y = Math.PI;
-    // group.add(backTitleBar);
-
-    // === POINT LIGHT with adaptive intensity ===
-    // Dark colors get MORE light, bright colors get LESS
-    // Use max channel (not luminance) so cyan/bright colors are properly penalized
+    // Point light with adaptive intensity
     const maxChannel = Math.max(cardColor.r, cardColor.g, cardColor.b);
-    // Inverse relationship: dark (max ~0) gets high intensity, bright (max ~1) gets low
-    // Range: max 0 -> intensity 4, max 1 -> intensity 0.3
     const adaptiveIntensity = 0.15 + 1.35 * (1 - maxChannel);
     const cardLight = new THREE.PointLight(cardColor, adaptiveIntensity, 25, 2);
     cardLight.position.set(0, 0, 0);
     group.add(cardLight);
 
-    // === GLOW PLANES - front and back, match card exactly ===
+    // Glow planes - front and back
     const glowTexture = createGlowTexture(cardColor);
     const glowMaterial = new THREE.MeshBasicMaterial({
         map: glowTexture,
@@ -1136,27 +1211,25 @@ function create3DCard(data, index) {
         depthWrite: false,
         depthTest: true
     });
-    // Front glow - slightly in front of card
     const glowGeometry = new THREE.PlaneGeometry(width * 2.5, height * 2.5);
     const glowFront = new THREE.Mesh(glowGeometry, glowMaterial);
     glowFront.position.set(0, 0, depth / 2 + 0.01);
     glowFront.renderOrder = -1;
     group.add(glowFront);
 
-    // Back glow - slightly behind card
     const glowBack = new THREE.Mesh(glowGeometry, glowMaterial.clone());
     glowBack.position.set(0, 0, -depth / 2 - 0.01);
-    glowBack.rotation.y = Math.PI;  // Face outward
+    glowBack.rotation.y = Math.PI;
     glowBack.renderOrder = -1;
     group.add(glowBack);
 
-    // Store glow reference for hover effects
     glowFront.userData.baseScale = { x: width * 2.5, y: height * 2.5 };
     group.userData.glowSprite = glowFront;
     group.userData.glowBack = glowBack;
     group.userData.glowMaterial = glowMaterial;
 
-    // === TITLE TEXT at bottom (front only) ===
+    // Title text at bottom
+    const titleBarHeight = height * 0.35;
     if (loadedFont) {
         const textGeometry = new THREE.TextGeometry(data.title, {
             font: loadedFont,
@@ -1165,15 +1238,11 @@ function create3DCard(data, index) {
             curveSegments: 8,
             bevelEnabled: false
         });
-
         textGeometry.computeBoundingBox();
         const textWidth = textGeometry.boundingBox.max.x - textGeometry.boundingBox.min.x;
         const centerX = -textWidth / 2;
-
         const textMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff });
         const cardText = new THREE.Mesh(textGeometry, textMaterial);
-
-        // Position centered in title bar
         cardText.position.set(centerX, -height / 2 + titleBarHeight / 2 - 0.3, depth / 2 + 0.1);
         group.add(cardText);
     }
@@ -1188,6 +1257,7 @@ function create3DCard(data, index) {
 
     return group;
 }
+*/
 
 function initSpiral3D() {
     spiralGroup = new THREE.Group();
