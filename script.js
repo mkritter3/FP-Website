@@ -762,8 +762,18 @@ function createGlowTexture(color) {
 
 // === AUDIO SYSTEM with positional reverb ===
 function initAudioContext() {
-    if (audioContext) return audioContext;
+    if (audioContext) {
+        // Resume if suspended (browser autoplay policy)
+        if (audioContext.state === 'suspended') {
+            audioContext.resume();
+        }
+        return audioContext;
+    }
     audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    // Resume immediately (required after user interaction)
+    if (audioContext.state === 'suspended') {
+        audioContext.resume();
+    }
     return audioContext;
 }
 
@@ -877,6 +887,10 @@ function toggleMute() {
 function initializeAllVideoAudio() {
     if (audioInitialized) return;
     audioInitialized = true;
+
+    // Ensure AudioContext is created and resumed
+    const ctx = initAudioContext();
+    console.log('AudioContext state:', ctx.state);
 
     for (const card of card3DArray) {
         const ud = card.userData;
